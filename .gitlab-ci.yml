@@ -80,10 +80,10 @@ update_manifests:
     - git checkout $CI_COMMIT_REF_NAME
     
     # Update Backend Deployment Image
-    - sed -i "s|image: .*|image: $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA|g" k8s/backend.yaml
+    - 'sed -i "s|image: .*|image: $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA|g" k8s/backend.yaml'
     
     # Update Frontend Deployment Image
-    - sed -i "s|image: .*|image: $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA|g" k8s/frontend.yaml
+    - 'sed -i "s|image: .*|image: $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA|g" k8s/frontend.yaml'
     
     # Commit and Push
     - git add k8s/backend.yaml k8s/frontend.yaml
