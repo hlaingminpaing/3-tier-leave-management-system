@@ -181,3 +181,105 @@ jobs:
           
           # Only commit and push if there are changes
           git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update k8s manifests with new image tags [skip ci]" && git push)
+
+  scan-images:
+    name: Trivy Image Scanning
+    needs: build-and-push
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Run Trivy scan - Backend Image
+        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
+          format: 'sarif'
+          output: 'trivy-backend-results.sarif'
+
+      - name: Run Trivy scan - Frontend Image
+        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
+          format: 'sarif'
+          output: 'trivy-frontend-results.sarif'
+
+      - name: Upload Trivy results to GitHub Security tab - Backend
+        uses: github/codeql-action/upload-sarif@1846c5207a86b0b2b8b91adb64c67a70f0621e19 # v3
+        if: always()
+        with:
+          sarif_file: 'trivy-backend-results.sarif'
+          category: 'trivy-backend'
+
+      - name: Upload Trivy results to GitHub Security tab - Frontend
+        uses: github/codeql-action/upload-sarif@1846c5207a86b0b2b8b91adb64c67a70f0621e19 # v3
+        if: always()
+        with:
+          sarif_file: 'trivy-frontend-results.sarif'
+          category: 'trivy-frontend'
+
+      - name: Generate Trivy report - Backend (Table format)
+        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
+          format: 'table'
+          output: 'trivy-backend-report.txt'
+
+      - name: Generate Trivy report - Frontend (Table format)
+        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
+          format: 'table'
+          output: 'trivy-frontend-report.txt'
+
+      - name: Generate Trivy report - Backend (JSON format)
+        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
+          format: 'json'
+          output: 'trivy-backend-report.json'
+
+      - name: Generate Trivy report - Frontend (JSON format)
+        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
+          format: 'json'
+          output: 'trivy-frontend-report.json'
+
+      - name: Upload Trivy scanning artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: trivy-scan-reports
+          path: |
+            trivy-*-report.txt
+            trivy-*-report.json
+            trivy-*-results.sarif
+          retention-days: 30
+
+      - name: Print Backend Trivy Report
+        if: always()
+        run: |
+          echo "## Backend Image Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat trivy-backend-report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Print Frontend Trivy Report
+        if: always()
+        run: |
+          echo "## Frontend Image Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat trivy-frontend-report.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
