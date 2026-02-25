@@ -202,14 +202,14 @@ jobs:
           password: ${{ github.token }}
 
       - name: Run Trivy scan - Backend Image
-        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
           format: 'sarif'
           output: 'trivy-backend-results.sarif'
 
       - name: Run Trivy scan - Frontend Image
-        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
           format: 'sarif'
@@ -230,28 +230,28 @@ jobs:
           category: 'trivy-frontend'
 
       - name: Generate Trivy report - Backend (Table format)
-        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
           format: 'table'
           output: 'trivy-backend-report.txt'
 
       - name: Generate Trivy report - Frontend (Table format)
-        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
           format: 'table'
           output: 'trivy-frontend-report.txt'
 
       - name: Generate Trivy report - Backend (JSON format)
-        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/backend:latest
           format: 'json'
           output: 'trivy-backend-report.json'
 
       - name: Generate Trivy report - Frontend (JSON format)
-        uses: aquasecurity/trivy-action@637d82b9f4f51d2c32f3daa4c3f2e2f6e0f7f9c # master
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ env.REGISTRY }}/${{ github.repository }}/frontend:latest
           format: 'json'
