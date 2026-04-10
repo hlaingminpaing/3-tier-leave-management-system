@@ -1,0 +1,195 @@
+# Default values for leave-management-system Helm chart
+# This is a YAML-formatted file for GitOps deployment
+
+# Global configuration
+global:
+  namespace: default
+  environment: production
+
+# Frontend configuration
+frontend:
+  enabled: true
+  replicaCount: 1
+  
+  image:
+    repository: ghcr.io/hlaingminpaing/3-tier-leave-management-system/frontend
+    tag: sha-e2ac005
+    pullPolicy: Always
+  
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 80
+  
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  
+  env:
+    API_URL: "/api"
+  
+  podAnnotations: {}
+  # annotations:
+  #   prometheus.io/scrape: "true"
+  
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 101
+    fsGroup: 101
+
+# Backend configuration
+backend:
+  enabled: true
+  replicaCount: 1
+  
+  image:
+    repository: ghcr.io/hlaingminpaing/3-tier-leave-management-system/backend
+    tag: sha-e2ac005
+    pullPolicy: Always
+  
+  service:
+    type: ClusterIP
+    port: 3000
+    targetPort: 3000
+    metricsPort: 9464
+  
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  
+  env:
+    OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo.monitoring.svc.cluster.local:4318"
+    LOG_LEVEL: "info"
+  
+  # Database configuration
+  database:
+    host: mysql
+    name: leave_db
+    port: 3306
+  
+  # Secrets management - use external secrets for production
+  secrets:
+    externalSecrets: false
+    # If externalSecrets is true, this Secret name will be used
+    externalSecretsName: "leave-secrets-external"
+    # If externalSecrets is false, inline secrets are created
+    inline:
+      dbUser: "root"
+      dbPassword: "root"
+      jwtSecret: "super-secure-jwt-secret-key"
+      rootPassword: "root"
+  
+  podAnnotations: {}
+  # Example for Prometheus monitoring:
+  # annotations:
+  #   prometheus.io/scrape: "true"
+  #   prometheus.io/port: "9464"
+  #   prometheus.io/path: "/metrics"
+  
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+  
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+    targetCPUUtilizationPercentage: 50
+    targetMemoryUtilizationPercentage: 70
+
+# MySQL configuration
+mysql:
+  enabled: true
+  
+  image:
+    repository: mysql
+    tag: "8"
+    pullPolicy: IfNotPresent
+  
+  service:
+    type: ClusterIP
+    port: 3306
+    headless: true
+  
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: ""  # Use default storage class
+    # Force access mode for persistence
+    accessMode: ReadWriteOnce
+  
+  podAnnotations: {}
+  
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+    fsGroup: 999
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    # IMPORTANT: Set your ACM certificate ARN
+    alb.ingress.kubernetes.io/certificate-arn: ""
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+  
+  host: "leave.example.com"
+  paths:
+    - path: /api
+      pathType: Prefix
+      backend: backend
+    - path: /
+      pathType: Prefix
+      backend: frontend
+
+# Network policies
+networkPolicies:
+  enabled: false
+
+# Gateway API configuration (alternative to Ingress)
+gatewayApi:
+  enabled: false
+  tls:
+    certificateSecretName: "leave-system-cert"
+  
+# HPA for backend
+autoscaling:
+  enabled: true
+
+# Service Monitor for Prometheus (optional)
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+
+# Service Account
+serviceAccount:
+  create: true
+  name: leave-system-sa
+
+# Override fullname
+nameOverride: ""
+fullnameOverride: ""

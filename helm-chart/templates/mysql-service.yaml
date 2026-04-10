@@ -1,0 +1,24 @@
+{{- if .Values.mysql.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "leave-management-system.fullname" . }}-mysql
+  labels:
+    {{- include "leave-management-system.labels" . | nindent 4 }}
+    component: mysql
+  namespace: {{ .Values.global.namespace }}
+spec:
+  {{- if .Values.mysql.service.headless }}
+  clusterIP: None
+  {{- else }}
+  type: {{ .Values.mysql.service.type }}
+  {{- end }}
+  ports:
+  - port: {{ .Values.mysql.service.port }}
+    targetPort: mysql
+    protocol: TCP
+    name: mysql
+  selector:
+    {{- include "leave-management-system.selectorLabels" . | nindent 4 }}
+    component: mysql
+{{- end }}

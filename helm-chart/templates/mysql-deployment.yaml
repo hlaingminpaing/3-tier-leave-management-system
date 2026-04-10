@@ -1,0 +1,85 @@
+{{- if .Values.mysql.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "leave-management-system.fullname" . }}-mysql
+  labels:
+    {{- include "leave-management-system.labels" . | nindent 4 }}
+    component: mysql
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "leave-management-system.selectorLabels" . | nindent 6 }}
+      component: mysql
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      {{- with .Values.mysql.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "leave-management-system.selectorLabels" . | nindent 8 }}
+        component: mysql
+    spec:
+      {{- with .Values.mysql.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "leave-management-system.serviceAccountName" . }}
+      containers:
+      - image: "{{ .Values.mysql.image.repository }}:{{ .Values.mysql.image.tag }}"
+        name: mysql
+        imagePullPolicy: {{ .Values.mysql.image.pullPolicy }}
+        ports:
+        - containerPort: 3306
+          name: mysql
+        {{- with .Values.mysql.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        env:
+        - name: MYSQL_ROOT_PASSWORD
+          {{- if .Values.backend.secrets.externalSecrets }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.backend.secrets.externalSecretsName }}
+              key: root-password
+          {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "leave-management-system.fullname" . }}-secrets
+              key: root-password
+          {{- end }}
+        - name: MYSQL_DATABASE
+          value: {{ .Values.backend.database.name | quote }}
+        volumeMounts:
+        - name: mysql-persistent-storage
+          mountPath: /var/lib/mysql
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - mysqladmin ping -h localhost -u root -p$MYSQL_ROOT_PASSWORD
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - mysqladmin ping -h localhost -u root -p$MYSQL_ROOT_PASSWORD
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+      volumes:
+      - name: mysql-persistent-storage
+        persistentVolumeClaim:
+          claimName: {{ include "leave-management-system.fullname" . }}-mysql-pvc
+{{- end }}

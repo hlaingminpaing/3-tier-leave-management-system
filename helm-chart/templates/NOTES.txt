@@ -1,0 +1,69 @@
+1. Get the application URL by running these commands:
+{{- if .Values.ingress.enabled }}
+  Ingress is enabled: https://{{ .Values.ingress.host }}
+{{- else if contains "NodePort" .Values.frontend.service.type }}
+  export NODE_PORT=$(kubectl get nodes --namespace {{ .Values.global.namespace }} -o jsonpath="{.items[0].status.addresses[?(@.type=='ExternalIP')].address}")
+  export NODE_PORT=$(kubectl get services --namespace {{ .Values.global.namespace }} {{ include "leave-management-system.fullname" . }}-frontend -o jsonpath='{.spec.ports[0].nodePort}')
+  echo http://$NODE_PORT:{{ .Values.frontend.service.port }}
+{{- else if contains "LoadBalancer" .Values.frontend.service.type }}
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+  You can watch the status of by running:
+    kubectl get svc --namespace {{ .Values.global.namespace }} -w {{ include "leave-management-system.fullname" . }}-frontend
+{{- else if contains "ClusterIP" .Values.frontend.service.type }}
+  Use port-forward to access the service:
+    kubectl port-forward -n {{ .Values.global.namespace }} service/{{ include "leave-management-system.fullname" . }}-frontend 8080:80
+    Visit: http://localhost:8080
+{{- end }}
+
+2. Check the status of deployments:
+  kubectl get pods -n {{ .Values.global.namespace }}
+
+3. View logs from components:
+  # Backend logs
+  kubectl logs -n {{ .Values.global.namespace }} -l component=backend
+
+  # Frontend logs
+  kubectl logs -n {{ .Values.global.namespace }} -l component=frontend
+
+  # MySQL logs
+  kubectl logs -n {{ .Values.global.namespace }} -l component=mysql
+
+4. Configuration Notes:
+  {{- if .Values.backend.secrets.externalSecrets }}
+  - External Secrets are enabled. Ensure the external secret {{ .Values.backend.secrets.externalSecretsName }} exists.
+  {{- else }}
+  - Secrets are embedded in the chart. For production, use External Secrets or sealed secrets.
+  - Current DB User: {{ .Values.backend.secrets.inline.dbUser }}
+  {{- end }}
+  - Database: {{ .Values.backend.database.name }}
+  - Backend API Port: {{ .Values.backend.service.port }}
+  - Frontend Port: {{ .Values.frontend.service.port }}
+  - MySQL Port: {{ .Values.mysql.service.port }}
+
+{{- if .Values.backend.autoscaling.enabled }}
+
+5. Autoscaling is enabled:
+  - Min Replicas: {{ .Values.backend.autoscaling.minReplicas }}
+  - Max Replicas: {{ .Values.backend.autoscaling.maxReplicas }}
+  - CPU Target: {{ .Values.backend.autoscaling.targetCPUUtilizationPercentage }}%
+  - Memory Target: {{ .Values.backend.autoscaling.targetMemoryUtilizationPercentage }}%
+
+  Monitor HPA status with:
+    kubectl get hpa -n {{ .Values.global.namespace }}
+{{- end }}
+
+6. For GitOps integration:
+  - Store your values in a separate values file (e.g., values-prod.yaml)
+  - Reference in ArgoCD application:
+    helm:
+      valuesFiles:
+      - values.yaml
+      - values-prod.yaml
+
+7. Troubleshooting:
+  {{- if .Values.ingress.enabled }}
+  - Ensure your ACM certificate ARN is set in ingress.annotations
+  {{- end }}
+  - Check if ingress-alb-controller is installed for ALB ingress
+  - Verify MySQL is running before backend connects:
+    kubectl get pods -n {{ .Values.global.namespace }} -l component=mysql

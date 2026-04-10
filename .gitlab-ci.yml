@@ -4,19 +4,29 @@ stages:
   - test
   - security
   - build
-  - deploy
+  - validate
 
 variables:
   REGISTRY: $CI_REGISTRY
   IMAGE_PREFIX: $CI_REGISTRY_IMAGE
+  DOCKER_BUILDKIT: 1
 
-# --- UNIT TESTING STAGE ---
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - backend/node_modules/
+    - frontend/node_modules/
+
 test_backend:
   stage: test
   script:
     - cd backend
     - npm ci
     - npm test -- --coverage
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-backend
+    paths:
+      - backend/node_modules/
 
 test_frontend:
   stage: test
@@ -24,8 +34,11 @@ test_frontend:
     - cd frontend
     - npm ci
     - npm test -- --coverage
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}-frontend
+    paths:
+      - frontend/node_modules/
 
-# --- SECURITY STAGE (DevSecOps) ---
 include:
   - template: Security/SAST.gitlab-ci.yml
   - template: Security/Secret-Detection.gitlab-ci.yml
@@ -40,28 +53,26 @@ secret_detection:
 dependency_scanning:
   stage: security
 
-# --- BUILD STAGE ---
 build_and_push:
   stage: build
   image: docker:latest
   services:
     - docker:dind
   before_script:
-    # Authenticate to GitLab Container Registry
-    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
   script:
-    # Backend
+    - export DOCKER_BUILDKIT=1
+
     - echo "Building Backend..."
     - cd backend
-    - docker build -t $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA -t $REGISTRY/$IMAGE_PREFIX/backend:latest .
+    - docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA -t $REGISTRY/$IMAGE_PREFIX/backend:latest .
     - docker push $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA
     - docker push $REGISTRY/$IMAGE_PREFIX/backend:latest
     - cd ..
-    
-    # Frontend
+
     - echo "Building Frontend..."
     - cd frontend
-    - docker build -t $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA -t $REGISTRY/$IMAGE_PREFIX/frontend:latest .
+    - docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA -t $REGISTRY/$IMAGE_PREFIX/frontend:latest .
     - docker push $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA
     - docker push $REGISTRY/$IMAGE_PREFIX/frontend:latest
     - cd ..
@@ -69,33 +80,21 @@ build_and_push:
     - main
     - master
 
-# --- DEPLOY STAGE ---
-update_manifests:
-  stage: deploy
-  image: bitnami/git:latest
-  before_script:
-    - git config --global user.email "ci-bot@gitlab.com"
-    - git config --global user.name "CI Bot"
+lint_k8s:
+  stage: validate
+  image: bitnami/kubectl:latest
   script:
-    - git checkout $CI_COMMIT_REF_NAME
-    
-    # Update Backend Deployment Image
-    - 'sed -i "s|image: .*|image: $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA|g" k8s/backend.yaml'
-    
-    # Update Frontend Deployment Image
-    - 'sed -i "s|image: .*|image: $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA|g" k8s/frontend.yaml'
-    
-    # Commit and Push
-    - git add k8s/backend.yaml k8s/frontend.yaml
-    - |
-      if git diff --cached --quiet; then
-        echo "No changes to commit."
-      else
-        git commit -m "Update image tags to $CI_COMMIT_SHORT_SHA [skip ci]"
-        # Pushing back to the repository using the job token
-        git remote set-url origin "https://oauth2:${CI_JOB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
-        git push origin HEAD:$CI_COMMIT_REF_NAME
-      fi
+    - kubectl apply -f k8s/ --dry-run=client
+  only:
+    - main
+    - master
+
+lint_helm:
+  stage: validate
+  image: bitnami/helm:latest
+  script:
+    - helm lint helm-chart/
+    - helm template test-release helm-chart/
   only:
     - main
     - master

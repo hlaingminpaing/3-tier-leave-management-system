@@ -1,0 +1,27 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: leave-system-gateway
+  namespace: default
+  labels:
+    app: leave-management-system
+    release: leave-system
+spec:
+  gatewayClassName: leave-system-nginx
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+    allowedRoutes:
+      namespaces:
+        from: All
+  - name: https
+    port: 443
+    protocol: HTTPS
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: leave-system-cert
+    allowedRoutes:
+      namespaces:
+        from: All

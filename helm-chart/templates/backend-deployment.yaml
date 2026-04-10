@@ -1,0 +1,129 @@
+{{- if .Values.backend.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "leave-management-system.fullname" . }}-backend
+  labels:
+    {{- include "leave-management-system.labels" . | nindent 4 }}
+    component: backend
+  namespace: {{ .Values.global.namespace }}
+spec:
+  {{- if not .Values.backend.autoscaling.enabled }}
+  replicas: {{ .Values.backend.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "leave-management-system.selectorLabels" . | nindent 6 }}
+      component: backend
+  template:
+    metadata:
+      {{- with .Values.backend.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "leave-management-system.selectorLabels" . | nindent 8 }}
+        component: backend
+    spec:
+      {{- with .Values.backend.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "leave-management-system.serviceAccountName" . }}
+      containers:
+      - name: backend
+        image: "{{ .Values.backend.image.repository }}:{{ .Values.backend.image.tag }}"
+        imagePullPolicy: {{ .Values.backend.image.pullPolicy }}
+        ports:
+        - name: http
+          containerPort: 3000
+          protocol: TCP
+        - name: metrics-otel
+          containerPort: 9464
+          protocol: TCP
+        {{- with .Values.backend.resources }}
+        resources:
+          {{- toYaml . | nindent 12 }}
+        {{- end }}
+        env:
+        - name: DB_HOST
+          {{- if .Values.backend.secrets.externalSecrets }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.backend.secrets.externalSecretsName }}
+              key: db-host
+          {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "leave-management-system.fullname" . }}-secrets
+              key: db-host
+          {{- end }}
+        - name: DB_USER
+          {{- if .Values.backend.secrets.externalSecrets }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.backend.secrets.externalSecretsName }}
+              key: db-user
+          {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "leave-management-system.fullname" . }}-secrets
+              key: db-user
+          {{- end }}
+        - name: DB_PASS
+          {{- if .Values.backend.secrets.externalSecrets }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.backend.secrets.externalSecretsName }}
+              key: db-password
+          {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "leave-management-system.fullname" . }}-secrets
+              key: db-password
+          {{- end }}
+        - name: DB_NAME
+          {{- if .Values.backend.secrets.externalSecrets }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.backend.secrets.externalSecretsName }}
+              key: db-name
+          {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "leave-management-system.fullname" . }}-secrets
+              key: db-name
+          {{- end }}
+        - name: JWT_SECRET
+          {{- if .Values.backend.secrets.externalSecrets }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.backend.secrets.externalSecretsName }}
+              key: jwt-secret
+          {{- else }}
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "leave-management-system.fullname" . }}-secrets
+              key: jwt-secret
+          {{- end }}
+        {{- range $key, $value := .Values.backend.env }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
+        {{- end }}
+        livenessProbe:
+          httpGet:
+            path: /api/health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /api/ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+{{- end }}

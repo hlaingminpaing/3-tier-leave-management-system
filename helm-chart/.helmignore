@@ -1,0 +1,31 @@
+# Patterns to ignore when building packages.
+# This supports shell glob patterns, relative path patterns, and
+# patterns with double asterisks '**' for matching zero or more directories.
+# For more details, see the documentation: http://helm.sh/docs/using_helm/#using-helm
+
+# Ignore .git, .gitignore
+.git/
+.gitignore
+
+# Ignore IDEs
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+
+# Ignore node_modules
+node_modules/
+
+# Ignore env files
+.env
+.env.local
+
+# Ignore test files
+tests/
+*.test.js
+
+# Ignore documentation
+README.md
+docs/

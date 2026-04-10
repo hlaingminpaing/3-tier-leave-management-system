@@ -1,0 +1,130 @@
+# Example ArgoCD Application for GitOps Deployment
+# This demonstrates best practices for GitOps with the leave management system
+
+---
+# Production ArgoCD Application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: leave-system-prod
+  namespace: argocd
+spec:
+  # Reference to the ArgoCD project
+  project: default
+  
+  source:
+    # Git repository containing the Helm chart
+    repoURL: https://github.com/your-org/3tier-leave-system
+    targetRevision: main
+    path: helm-chart
+    
+    # Helm specific configuration
+    helm:
+      releaseName: leave-system
+      # Values files are applied in order
+      valuesFiles:
+        - values.yaml           # Base values
+        - values-prod.yaml      # Production-specific overrides
+      # Alternative: inline values
+      # values: |
+      #   backend:
+      #     image:
+      #       tag: v1.2.3
+  
+  # Destination cluster and namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  
+  # Sync policy for GitOps
+  syncPolicy:
+    # Automated sync settings
+    automated:
+      prune: true           # Delete resources not in Git
+      selfHeal: true        # Auto-sync when cluster diverges
+      allow:
+        empty: false        # Prevent deletion of entire applications
+    
+    syncOptions:
+      - CreateNamespace=true  # Create namespace if missing
+      - PrunePropagationPolicy=foreground
+      - RespectIgnoreDifferences=true
+    
+    # Manual sync can be triggered via: argocd app sync leave-system-prod
+    # retry:
+    #   limit: 5
+    #   backoff:
+    #     duration: 5s
+    #     factor: 2
+    #     maxDuration: 3m
+  
+  # Optional: Health assessment rules
+  # ignoreDifferences:
+  # - group: apps
+  #   kind: Deployment
+  #   jsonPointers:
+  #   - /spec/replicas
+
+---
+# Staging ArgoCD Application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: leave-system-staging
+  namespace: argocd
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/your-org/3tier-leave-system
+    targetRevision: staging
+    path: helm-chart
+    
+    helm:
+      releaseName: leave-system
+      valuesFiles:
+        - values.yaml
+        - values-staging.yaml
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+
+---
+# Development ArgoCD Application
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: leave-system-dev
+  namespace: argocd
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/your-org/3tier-leave-system
+    targetRevision: develop
+    path: helm-chart
+    
+    helm:
+      releaseName: leave-system
+      valuesFiles:
+        - values.yaml
+        - values-dev.yaml
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  
+  syncPolicy:
+    automated:
+      prune: false        # Don't auto-prune in dev
+      selfHeal: false     # Manual control for development
+    syncOptions:
+      - CreateNamespace=true

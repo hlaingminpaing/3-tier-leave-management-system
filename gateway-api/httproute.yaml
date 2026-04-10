@@ -1,0 +1,43 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: leave-system-routes
+  namespace: default
+  labels:
+    app: leave-management-system
+    release: leave-system
+spec:
+  parentRefs:
+  - name: leave-system-gateway
+    namespace: default
+  rules:
+  # Frontend routes
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /
+    backendRefs:
+    - name: leave-system-frontend
+      port: 80
+      weight: 100
+    filters:
+    - type: RequestRedirect
+      requestRedirect:
+        scheme: https
+        statusCode: 301
+    timeouts:
+      request: 30s
+      backendRequest: 30s
+  
+  # API routes
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /api
+    backendRefs:
+    - name: leave-system-backend
+      port: 3000
+      weight: 100
+    timeouts:
+      request: 60s
+      backendRequest: 60s

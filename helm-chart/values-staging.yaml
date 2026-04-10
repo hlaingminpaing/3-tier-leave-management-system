@@ -1,0 +1,54 @@
+# Staging environment values override
+# Usage: helm install -f values.yaml -f values-staging.yaml
+
+global:
+  namespace: staging
+  environment: staging
+
+frontend:
+  replicaCount: 2
+  image:
+    tag: sha-e2ac005
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+
+backend:
+  replicaCount: 2
+  image:
+    tag: sha-e2ac005
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  secrets:
+    externalSecrets: true
+    externalSecretsName: leave-secrets-staging
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 3
+
+mysql:
+  persistence:
+    size: 5Gi
+
+ingress:
+  enabled: true
+  annotations:
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:region:account-id:certificate/staging-cert-id"
+  host: "leave-staging.example.com"
+
+# Service Account
+serviceAccount:
+  create: true
+  name: leave-system-staging-sa

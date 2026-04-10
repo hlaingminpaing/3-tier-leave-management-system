@@ -1,0 +1,52 @@
+# Development environment values override
+# Usage: helm install -f values.yaml -f values-dev.yaml
+
+global:
+  namespace: default
+  environment: development
+
+frontend:
+  replicaCount: 1
+  image:
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
+backend:
+  replicaCount: 1
+  image:
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  secrets:
+    inline:
+      dbUser: "dev"
+      dbPassword: "devpassword"
+      jwtSecret: "dev-jwt-secret"
+      rootPassword: "devroot"
+  autoscaling:
+    enabled: false
+
+mysql:
+  persistence:
+    size: 1Gi
+
+ingress:
+  enabled: false
+
+# Service Account
+serviceAccount:
+  create: true
+  name: leave-system-sa
