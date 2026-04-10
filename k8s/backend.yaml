@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: ghcr.io/hlaingminpaing/3-tier-leave-management-system/backend:sha-f2cf12b
+        image: ghcr.io/hlaingminpaing/3-tier-leave-management-system/backend:sha-f2ac217
         imagePullPolicy: Always
         ports:
         - containerPort: 3000
