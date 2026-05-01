@@ -1,21 +1,26 @@
 image: node:22-alpine
 
+workflow:
+  rules:
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
 stages:
   - test
   - security
   - build
-  - validate
+  - deploy
 
 variables:
+  DOCKER_TLS_CERTDIR: ""
   REGISTRY: $CI_REGISTRY
   IMAGE_PREFIX: $CI_REGISTRY_IMAGE
-  DOCKER_BUILDKIT: 1
+  VERSION_TAG: ${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
 
-cache:
-  key: ${CI_COMMIT_REF_SLUG}
-  paths:
-    - backend/node_modules/
-    - frontend/node_modules/
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
 
 test_backend:
   stage: test
@@ -23,10 +28,9 @@ test_backend:
     - cd backend
     - npm ci
     - npm test -- --coverage
-  cache:
-    key: ${CI_COMMIT_REF_SLUG}-backend
+  artifacts:
     paths:
-      - backend/node_modules/
+      - backend/coverage/
 
 test_frontend:
   stage: test
@@ -34,22 +38,14 @@ test_frontend:
     - cd frontend
     - npm ci
     - npm test -- --coverage
-  cache:
-    key: ${CI_COMMIT_REF_SLUG}-frontend
+  artifacts:
     paths:
-      - frontend/node_modules/
-
-include:
-  - template: Security/SAST.gitlab-ci.yml
-  - template: Security/Secret-Detection.gitlab-ci.yml
-  - template: Security/Dependency-Scanning.gitlab-ci.yml
+      - frontend/coverage/
 
 sast:
   stage: security
-
 secret_detection:
   stage: security
-
 dependency_scanning:
   stage: security
 
@@ -58,43 +54,156 @@ build_and_push:
   image: docker:latest
   services:
     - docker:dind
+  needs: ["test_backend", "test_frontend"]
   before_script:
-    - echo "$CI_REGISTRY_PASSWORD" | docker login $REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
+    - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
+    - echo "Using version tag $VERSION_TAG"
+    - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
   script:
-    - export DOCKER_BUILDKIT=1
+    # Backend Build
+    - echo "Building Backend version $VERSION_TAG..."
+    - docker build -t $IMAGE_PREFIX/backend:$VERSION_TAG -t $IMAGE_PREFIX/backend:latest ./backend
+    - docker push $IMAGE_PREFIX/backend:$VERSION_TAG
+    - docker push $IMAGE_PREFIX/backend:latest
 
-    - echo "Building Backend..."
-    - cd backend
-    - docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA -t $REGISTRY/$IMAGE_PREFIX/backend:latest .
-    - docker push $REGISTRY/$IMAGE_PREFIX/backend:sha-$CI_COMMIT_SHORT_SHA
-    - docker push $REGISTRY/$IMAGE_PREFIX/backend:latest
-    - cd ..
+    # Frontend Build
+    - echo "Building Frontend version $VERSION_TAG..."
+    - docker build -t $IMAGE_PREFIX/frontend:$VERSION_TAG -t $IMAGE_PREFIX/frontend:latest ./frontend
+    - docker push $IMAGE_PREFIX/frontend:$VERSION_TAG
+    - docker push $IMAGE_PREFIX/frontend:latest
 
-    - echo "Building Frontend..."
-    - cd frontend
-    - docker build --build-arg BUILDKIT_INLINE_CACHE=1 -t $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA -t $REGISTRY/$IMAGE_PREFIX/frontend:latest .
-    - docker push $REGISTRY/$IMAGE_PREFIX/frontend:sha-$CI_COMMIT_SHORT_SHA
-    - docker push $REGISTRY/$IMAGE_PREFIX/frontend:latest
-    - cd ..
-  only:
-    - main
-    - master
-
-lint_k8s:
-  stage: validate
-  image: bitnami/kubectl:latest
+update_manifests:
+  stage: deploy
+  image: bitnami/git:latest
+  needs: ["build_and_push"]
   script:
-    - kubectl apply -f k8s/ --dry-run=client
-  only:
-    - main
-    - master
+    - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
+    
+    - git remote set-url origin "https://${CI_DEPLOY_USER}:${GIT_DEPLOY_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
 
-lint_helm:
-  stage: validate
-  image: bitnami/helm:latest
-  script:
-    - helm lint helm-chart/
-    - helm template test-release helm-chart/
-  only:
-    - main
-    - master
+    - git config --global user.email "ci-bot@gitlab.com"
+    - git config --global user.name "CI Bot"
+    
+    - git fetch origin $CI_DEFAULT_BRANCH
+    - git checkout $CI_DEFAULT_BRANCH
+
+    - "sed -i \"s|image: $IMAGE_PREFIX/backend:.*|image: $IMAGE_PREFIX/backend:$VERSION_TAG|g\" k8s/backend.yaml"
+    - "sed -i \"s|image: $IMAGE_PREFIX/frontend:.*|image: $IMAGE_PREFIX/frontend:$VERSION_TAG|g\" k8s/frontend.yaml"
+
+    - |
+      if git diff --quiet; then
+        echo "No changes in manifests. Skipping push."
+      else
+        git add k8s/*.yaml
+        git commit -m "chore: update images to $VERSION_TAG [skip ci]"
+        git push origin $CI_DEFAULT_BRANCH
+      fi
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+##################################################
+# image: node:22-alpine
+
+# workflow:
+#   rules:
+#     - if: $CI_COMMIT_TAG
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# stages:
+#   - test
+#   - security
+#   - build
+#   - deploy
+
+# variables:
+#   DOCKER_TLS_CERTDIR: ""
+#   REGISTRY: $CI_REGISTRY
+#   IMAGE_PREFIX: $CI_REGISTRY_IMAGE
+#   VERSION_TAG: ${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
+
+# include:
+#   - template: Security/SAST.gitlab-ci.yml
+#   - template: Security/Secret-Detection.gitlab-ci.yml
+#   - template: Security/Dependency-Scanning.gitlab-ci.yml
+
+# test_backend:
+#   stage: test
+#   script:
+#     - cd backend
+#     - npm ci
+#     - npm test -- --coverage
+#   artifacts:
+#     paths:
+#       - backend/coverage/
+
+# test_frontend:
+#   stage: test
+#   script:
+#     - cd frontend
+#     - npm ci
+#     - npm test -- --coverage
+#   artifacts:
+#     paths:
+#       - frontend/coverage/
+
+# sast:
+#   stage: security
+# secret_detection:
+#   stage: security
+# dependency_scanning:
+#   stage: security
+
+# build_and_push:
+#   stage: build
+#   image: docker:latest
+#   services:
+#     - docker:dind
+#   needs: ["test_backend", "test_frontend"]
+#   before_script:
+#     - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
+#     - echo "Using version tag $VERSION_TAG"
+#     - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
+#   script:
+#     # Backend Build
+#     - echo "Building Backend version $VERSION_TAG..."
+#     - docker build -t $IMAGE_PREFIX/backend:$VERSION_TAG -t $IMAGE_PREFIX/backend:latest ./backend
+#     - docker push $IMAGE_PREFIX/backend:$VERSION_TAG
+#     - docker push $IMAGE_PREFIX/backend:latest
+
+#     # Frontend Build
+#     - echo "Building Frontend version $VERSION_TAG..."
+#     - docker build -t $IMAGE_PREFIX/frontend:$VERSION_TAG -t $IMAGE_PREFIX/frontend:latest ./frontend
+#     - docker push $IMAGE_PREFIX/frontend:$VERSION_TAG
+#     - docker push $IMAGE_PREFIX/frontend:latest
+
+# update_manifests:
+#   stage: deploy
+#   image: bitnami/git:latest
+#   needs: ["build_and_push"]
+#   script:
+#     # Version Tag ကို ရှာဖွေခြင်း
+#     - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
+    
+#     # Git Authentication (Deploy Token Username ကို အလိုအလျောက် ယူပါလိမ့်မည်)
+#     - git remote set-url origin "https://${CI_DEPLOY_USER}:${GIT_DEPLOY_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+
+#     - git config --global user.email "ci-bot@gitlab.com"
+#     - git config --global user.name "CI Bot"
+    
+#     - git fetch origin $CI_DEFAULT_BRANCH
+#     - git checkout $CI_DEFAULT_BRANCH
+
+#     # Manifest ဖိုင်များကို update လုပ်ခြင်း
+#     - "sed -i \"s|image: $IMAGE_PREFIX/backend:.*|image: $IMAGE_PREFIX/backend:$VERSION_TAG|g\" k8s/backend.yaml"
+#     - "sed -i \"s|image: $IMAGE_PREFIX/frontend:.*|image: $IMAGE_PREFIX/frontend:$VERSION_TAG|g\" k8s/frontend.yaml"
+
+#     - |
+#       if git diff --quiet; then
+#         echo "No changes in manifests. Skipping push."
+#       else
+#         git add k8s/*.yaml
+#         git commit -m "chore: update images to $VERSION_TAG [skip ci]"
+#         git push origin $CI_DEFAULT_BRANCH
+#       fi
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
