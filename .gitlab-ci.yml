@@ -101,7 +101,7 @@ update_manifests:
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
-##################################################
+###################################################
 # image: node:22-alpine
 
 # workflow:
