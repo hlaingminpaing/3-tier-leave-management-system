@@ -1,4 +1,4 @@
-require("./instrumentation"); // OpenTelemetry Setup MUST be first
+require("./instrumentation-enhanced"); // OpenTelemetry Setup MUST be first
 require("dotenv").config();
 const express = require("express");
 const bcrypt = require("bcryptjs");
@@ -6,8 +6,23 @@ const jwt = require("jsonwebtoken");
 const db = require("./db");
 const auth = require("./auth");
 
+// Import metrics middleware and tracking functions
+const {
+  metricsMiddleware,
+  trackLoginAttempt,
+  trackRegistration,
+  trackLeaveRequest,
+  trackLeaveStatusUpdate,
+  setActiveUser,
+  removeActiveUser,
+  getActiveUserCount,
+} = require("./metrics-middleware");
+
 const app = express();
 app.use(express.json());
+
+/* METRICS MIDDLEWARE - Track all HTTP requests */
+app.use(metricsMiddleware);
 
 /* CORS */
 app.use((req, res, next) => {
@@ -40,6 +55,7 @@ apiRouter.post("/register", async (req, res) => {
         console.error("Database error:", err);
         return res.status(500).json({ error: "Database error. Is MySQL running?" });
       }
+      trackRegistration(username, role || "EMPLOYEE");
       res.json({ message: "User created" });
     }
   );
@@ -58,15 +74,25 @@ apiRouter.post("/login", (req, res) => {
         return res.status(500).json({ error: "Database error. Is MySQL running?" });
       }
 
-      if (!rows.length) return res.sendStatus(401);
+      if (!rows.length) {
+        trackLoginAttempt(false, username);
+        return res.sendStatus(401);
+      }
 
       const valid = await bcrypt.compare(password, rows[0].password);
-      if (!valid) return res.sendStatus(401);
+      if (!valid) {
+        trackLoginAttempt(false, username);
+        return res.sendStatus(401);
+      }
 
       const token = jwt.sign(
         { id: rows[0].id, role: rows[0].role },
         process.env.JWT_SECRET
       );
+
+      // Track successful login and active user
+      trackLoginAttempt(true, username);
+      setActiveUser(rows[0].id);
 
       res.json({ token, role: rows[0].role });
     }
@@ -85,6 +111,8 @@ apiRouter.post("/leave", auth(), (req, res) => {
         console.error("Database error:", err);
         return res.status(500).json({ error: "Database error" });
       }
+      // Track leave request submission for Prometheus metric leave_requests_total
+      trackLeaveRequest(req.user.id, start_date, end_date, reason);
       res.json({ message: "Leave submitted" });
     }
   );
@@ -114,6 +142,17 @@ apiRouter.get("/admin/leaves", auth("ADMIN"), (_, res) => {
         console.error("Database error:", err);
         return res.status(500).json({ error: "Database error" });
       }
+
+      // Update leave requests by status for Prometheus gauge leave_requests_by_status
+      if (rows) {
+        const statusCounts = {};
+        rows.forEach(row => {
+          const status = row.status || 'PENDING';
+          statusCounts[status] = (statusCounts[status] || 0) + 1;
+        });
+        globalThis.leaveRequestsByStatus = statusCounts;
+      }
+
       res.json(rows);
     }
   );
@@ -131,6 +170,7 @@ apiRouter.post("/admin/leave/:id", auth("ADMIN"), (req, res) => {
         console.error("Database error:", err);
         return res.status(500).json({ error: "Database error" });
       }
+      trackLeaveStatusUpdate(req.params.id, status, req.user.id);
       res.json({ message: "Updated" });
     }
   );
