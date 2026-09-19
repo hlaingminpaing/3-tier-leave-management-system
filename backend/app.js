@@ -113,6 +113,7 @@ apiRouter.post("/leave", auth(), (req, res) => {
       }
       // Track leave request submission for Prometheus metric leave_requests_total
       trackLeaveRequest(req.user.id, start_date, end_date, reason);
+      syncLeaveMetricsFromDB();
       res.json({ message: "Leave submitted" });
     }
   );
@@ -171,6 +172,7 @@ apiRouter.post("/admin/leave/:id", auth("ADMIN"), (req, res) => {
         return res.status(500).json({ error: "Database error" });
       }
       trackLeaveStatusUpdate(req.params.id, status, req.user.id);
+      syncLeaveMetricsFromDB();
       res.json({ message: "Updated" });
     }
   );
@@ -178,6 +180,33 @@ apiRouter.post("/admin/leave/:id", auth("ADMIN"), (req, res) => {
 
 // MOUNT THE ROUTER AT /api
 app.use("/api", apiRouter);
+
+// Sync live leave status counts from database into global Prometheus gauges
+function syncLeaveMetricsFromDB() {
+  db.query(
+    "SELECT status, COUNT(*) as count FROM leave_requests GROUP BY status",
+    (err, rows) => {
+      if (!err && rows) {
+        const counts = { PENDING: 0, APPROVED: 0, REJECTED: 0 };
+        let approved = 0;
+        let rejected = 0;
+        rows.forEach((r) => {
+          counts[r.status] = Number(r.count) || 0;
+          if (r.status === "APPROVED") approved = Number(r.count) || 0;
+          if (r.status === "REJECTED") rejected = Number(r.count) || 0;
+        });
+        globalThis.leaveRequestsByStatus = counts;
+        globalThis.leaveApprovalStats = { approved, rejected };
+      }
+    }
+  );
+}
+
+// Initial sync on startup and periodic refresh every 30s
+if (process.env.NODE_ENV !== "test") {
+  syncLeaveMetricsFromDB();
+  setInterval(syncLeaveMetricsFromDB, 30000);
+}
 
 if (require.main === module) {
   app.listen(3000, () => console.log("Backend running on 3000"));

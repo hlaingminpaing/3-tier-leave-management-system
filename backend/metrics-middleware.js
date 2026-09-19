@@ -14,6 +14,8 @@ const {
     loginAttemptsCounter,
     registrationsCounter,
     leaveRequestsCounter,
+    leaveDaysUsedHistogram,
+    leaveApprovalRateGauge,
     authErrorsCounter,
     dbQueryLatencyHistogram,
     dbErrorsCounter,
@@ -181,10 +183,10 @@ function trackLeaveRequest(userId, startDate, endDate, reason) {
         reason: reason || 'other',
     });
 
-    // Record the number of days
+    // Record the number of days requested in histogram
     if (daysRequested > 0) {
-        leaveRequestsCounter.add(daysRequested, {
-            metric_type: 'days_requested',
+        leaveDaysUsedHistogram.record(daysRequested, {
+            reason: reason || 'other',
         });
     }
 
@@ -263,11 +265,13 @@ function trackAuthenticationError(errorType, details) {
 function setActiveUser(userId) {
     activeUsers.add(userId);
     activeUserCount = activeUsers.size;
+    globalThis.activeUserCount = activeUsers.size;
 }
 
 function removeActiveUser(userId) {
     activeUsers.delete(userId);
     activeUserCount = activeUsers.size;
+    globalThis.activeUserCount = activeUsers.size;
 }
 
 /**
