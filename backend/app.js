@@ -23,8 +23,9 @@ app.get("/health", (_, res) => res.send("OK"));
 /* API ROUTER (For ALB Routed Requests) */
 const apiRouter = express.Router();
 
-/* API HEALTH CHECK */
+/* API HEALTH & READINESS CHECKS */
 apiRouter.get("/health", (_, res) => res.json({ status: "healthy" }));
+apiRouter.get("/ready", (_, res) => res.json({ status: "ready" }));
 
 /* REGISTER USER */
 apiRouter.post("/register", async (req, res) => {

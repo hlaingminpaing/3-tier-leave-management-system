@@ -76,17 +76,17 @@ spec:
         {{- end }}
         livenessProbe:
           httpGet:
-            path: /api/health
+            path: /health
             port: http
-          initialDelaySeconds: 60
+          initialDelaySeconds: 30
           periodSeconds: 15
           timeoutSeconds: 5
           failureThreshold: 5
         readinessProbe:
           httpGet:
-            path: /api/ready
+            path: /health
             port: http
-          initialDelaySeconds: 20
+          initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
