@@ -128,11 +128,11 @@ update_helm_values:
     - git fetch origin $CI_DEFAULT_BRANCH
     - git checkout $CI_DEFAULT_BRANCH
   script:
-    # Update backend image tag: finds the line after "repository: .../backend" and replaces tag
-    - sed -i "/repository: ${IMAGE_PREFIX}\/backend/{n;s/tag:.*/tag: ${CI_COMMIT_TAG}/}" helm-chart/values.yaml
-    # Update frontend image tag: finds the line after "repository: .../frontend" and replaces tag
-    - sed -i "/repository: ${IMAGE_PREFIX}\/frontend/{n;s/tag:.*/tag: ${CI_COMMIT_TAG}/}" helm-chart/values.yaml
     - |
+      # Update backend image tag: find line after "repository: .../backend" and replace tag value
+      sed -i "/repository: ${IMAGE_PREFIX}\/backend/{n;s/tag:.*/tag: ${CI_COMMIT_TAG}/}" helm-chart/values.yaml
+      # Update frontend image tag: find line after "repository: .../frontend" and replace tag value
+      sed -i "/repository: ${IMAGE_PREFIX}\/frontend/{n;s/tag:.*/tag: ${CI_COMMIT_TAG}/}" helm-chart/values.yaml
       if git diff --quiet; then
         echo "No changes detected in helm-chart/values.yaml. Skipping commit."
       else
