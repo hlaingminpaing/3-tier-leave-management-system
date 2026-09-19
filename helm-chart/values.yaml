@@ -12,7 +12,7 @@ frontend:
   replicaCount: 1
   
   image:
-    repository: ghcr.io/hlaingminpaing/3-tier-leave-management-system/frontend
+    repository: registry.gitlab.com/hlaingminpaing/3-tier-leave-management-system/frontend
     tag: sha-e2ac005
     pullPolicy: Always
   
@@ -35,11 +35,6 @@ frontend:
   podAnnotations: {}
   # annotations:
   #   prometheus.io/scrape: "true"
-  
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 101
-    fsGroup: 101
 
 # Backend configuration
 backend:
@@ -47,7 +42,7 @@ backend:
   replicaCount: 1
   
   image:
-    repository: ghcr.io/hlaingminpaing/3-tier-leave-management-system/backend
+    repository: registry.gitlab.com/hlaingminpaing/3-tier-leave-management-system/backend
     tag: sha-e2ac005
     pullPolicy: Always
   
@@ -69,23 +64,53 @@ backend:
     OTEL_EXPORTER_OTLP_ENDPOINT: "http://tempo.monitoring.svc.cluster.local:4318"
     LOG_LEVEL: "info"
   
-  # Database configuration
+  # Database non-sensitive config (host/name/port are NOT secrets — safe in values.yaml)
+  # These are used only in inline mode. In existingSecret/sealedSecrets mode,
+  # db-host and db-name come from the Secret itself.
   database:
-    host: mysql
+    # In inline mode: host = the MySQL service name (StatefulSet headless service)
+    # Default: <release-name>-leave-management-system-mysql (set to actual service name)
+    host: "leave-management-system-mysql"
     name: leave_db
     port: 3306
   
-  # Secrets management - use external secrets for production
+  # ─────────────────────────────────────────────────────────────────────────
+  # Secrets Management — choose ONE mode, leave others at defaults
+  # ─────────────────────────────────────────────────────────────────────────
   secrets:
+
+    # ── Mode A: Existing Secret (RECOMMENDED — zero secrets in values.yaml) ──
+    # Point to a Secret that already exists in the cluster.
+    # Helm renders NO Secret resource — it just references this name.
+    # Create the Secret externally via SealedSecret (kubeseal) or manually:
+    #   kubectl apply -f sealed-secret.yaml
+    # When set, all other modes below are ignored.
+    existingSecret: ""
+
+    # ── Mode B: Inline (Development / local only) ──
+    # Helm creates a plain Secret from the values below.
+    # WARNING: passwords are stored in plain text in Helm state. Dev only!
     externalSecrets: false
-    # If externalSecrets is true, this Secret name will be used
     externalSecretsName: "leave-secrets-external"
-    # If externalSecrets is false, inline secrets are created
     inline:
       dbUser: "root"
       dbPassword: "root"
       jwtSecret: "super-secure-jwt-secret-key"
       rootPassword: "root"
+
+    # ── Mode C: Helm-managed SealedSecret (GitOps, encrypted in values) ──
+    # Helm renders a SealedSecret resource using kubeseal-encrypted values.
+    # Set sealedSecrets: true and paste your kubeseal encryptedData below.
+    # Install controller first: helm install sealed-secrets sealed-secrets/sealed-secrets -n kube-system
+    sealedSecrets: false
+    sealedSecretsData: {}
+    # sealedSecretsData:
+    #   db-user: AgB...      # kubeseal encrypted
+    #   db-password: AgB...  # kubeseal encrypted
+    #   jwt-secret: AgB...   # kubeseal encrypted
+    #   root-password: AgB.. # kubeseal encrypted
+    #   db-host: AgB...      # kubeseal encrypted
+    #   db-name: AgB...      # kubeseal encrypted
   
   podAnnotations: {}
   # Example for Prometheus monitoring:
@@ -93,12 +118,7 @@ backend:
   #   prometheus.io/scrape: "true"
   #   prometheus.io/port: "9464"
   #   prometheus.io/path: "/metrics"
-  
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    fsGroup: 1000
-  
+
   autoscaling:
     enabled: true
     minReplicas: 2
@@ -136,11 +156,6 @@ mysql:
     accessMode: ReadWriteOnce
   
   podAnnotations: {}
-  
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 999
-    fsGroup: 999
 
 # Ingress configuration
 ingress:

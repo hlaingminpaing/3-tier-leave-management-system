@@ -23,10 +23,6 @@ spec:
         {{- include "leave-management-system.selectorLabels" . | nindent 8 }}
         component: frontend
     spec:
-      {{- with .Values.frontend.podSecurityContext }}
-      securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
       serviceAccountName: {{ include "leave-management-system.serviceAccountName" . }}
       containers:
       - name: frontend

@@ -6,8 +6,9 @@
 - Kubernetes 1.19+ cluster
 - Helm 3.0+ installed
 - kubectl configured to access your cluster
+- `kubeseal` CLI installed locally (for Sealed Secrets encryption)
 - For production: AWS ALB Ingress Controller
-- For production: External Secrets addon
+- For production secrets: Sealed Secrets controller in `kube-system` (see below)
 
 ## 🚀 Quick Start
 
@@ -69,33 +70,87 @@ kubectl get ingress -n staging
 
 ### 4. Install in Production
 
-#### Step 1: Setup External Secrets (Recommended)
+#### Step 1: Install Sealed Secrets Controller
+
+Sealed Secrets runs in `kube-system` and holds the RSA private key used to decrypt
+secrets. The public key is safe to commit to Git and used by developers/CI to encrypt.
 
 ```bash
-# Install External Secrets addon
-helm repo add external-secrets https://charts.external-secrets.io
+# Add the Bitnami sealed-secrets chart repo
+helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
 helm repo update
 
-helm install external-secrets external-secrets/external-secrets \
-  -n external-secrets-system \
-  --create-namespace
+# Install controller in kube-system namespace
+helm install sealed-secrets sealed-secrets/sealed-secrets \
+  --namespace kube-system \
+  --set fullnameOverride=sealed-secrets-controller
 
-# Store secrets in AWS Secrets Manager
-aws secretsmanager create-secret \
-  --name leave-system/production \
-  --secret-string '{
-    "db-user": "prod_user",
-    "db-password": "secure-password",
-    "jwt-secret": "secure-jwt-secret",
-    "root-password": "secure-root-password",
-    "db-host": "mysql",
-    "db-name": "leave_db"
-  }'
-
-# Apply External Secrets configuration
-kubectl apply -f k8s-addational/eso-store.yaml
-kubectl apply -f k8s-addational/eso-secret.yaml
+# Verify controller is running
+kubectl get pods -n kube-system -l app.kubernetes.io/name=sealed-secrets
 ```
+
+#### Step 2: Fetch the Public Certificate
+
+```bash
+# Fetch and save the cluster's public certificate
+kubeseal --fetch-cert \
+  --controller-name=sealed-secrets-controller \
+  --controller-namespace=kube-system \
+  > pub-sealed-secrets.pem
+
+# Commit this cert to your repo (it is safe to share)
+git add pub-sealed-secrets.pem
+git commit -m "chore: add sealed secrets public certificate"
+```
+
+#### Step 3: Encrypt Your Production Secrets
+
+```bash
+# Create a temporary plain secret (do NOT commit this file)
+cat > /tmp/leave-plain-secret.yaml << 'EOF'
+apiVersion: v1
+kind: Secret
+metadata:
+  name: leave-system-leave-management-system-secrets
+  namespace: production
+type: Opaque
+stringData:
+  db-user: prod_db_user
+  db-password: YourStrongPassword123!
+  jwt-secret: YourVeryLongJWTSecretKeyHere!!
+  root-password: YourStrongRootPassword123!
+  db-host: leave-system-leave-management-system-mysql
+  db-name: leave_db
+EOF
+
+# Encrypt with kubeseal
+kubeseal \
+  --controller-name=sealed-secrets-controller \
+  --controller-namespace=kube-system \
+  --format=yaml \
+  < /tmp/leave-plain-secret.yaml
+
+# The output will contain encryptedData keys — copy them into values-prod.yaml
+```
+
+#### Step 4: Update `values-prod.yaml` with Encrypted Values
+
+```yaml
+# helm-chart/values-prod.yaml
+backend:
+  secrets:
+    externalSecrets: false
+    sealedSecrets: true
+    sealedSecretsData:
+      db-user: AgB...        # paste kubeseal output here
+      db-password: AgB...    # paste kubeseal output here
+      jwt-secret: AgB...     # paste kubeseal output here
+      root-password: AgB...  # paste kubeseal output here
+      db-host: AgB...        # paste kubeseal output here
+      db-name: AgB...        # paste kubeseal output here
+```
+
+> 📖 For detailed instructions, see **[SEALED_SECRETS_SETUP.md](./SEALED_SECRETS_SETUP.md)**
 
 #### Step 2: Setup AWS ALB Ingress Controller
 
@@ -114,7 +169,7 @@ helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
   --set clusterName=my-cluster
 ```
 
-#### Step 3: Update Production Values
+#### Step 5: Update Production Ingress Values
 
 Edit `helm-chart/values-prod.yaml`:
 
@@ -124,20 +179,15 @@ ingress:
   annotations:
     alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:123456789:certificate/abc123"
   host: "leave.example.com"
-
-backend:
-  secrets:
-    externalSecrets: true
-    externalSecretsName: leave-secrets-production
 ```
 
-#### Step 4: Create Production Namespace
+#### Step 6: Create Production Namespace
 
 ```bash
 kubectl create namespace production
 ```
 
-#### Step 5: Install in Production
+#### Step 7: Install in Production
 
 ```bash
 helm install leave-system ./helm-chart \
@@ -333,16 +383,26 @@ kubectl get hpa leave-system-backend-hpa -n production -w  # Watch metrics
 ### Secret Issues
 
 ```bash
-# Check if secrets are created
-kubectl get secrets -n production
+# Check if the SealedSecret exists
+kubectl get sealedsecret -n production
 
-# Verify secret content (for debugging only)
-kubectl get secret leave-system-secrets -n production -o yaml
+# Check SealedSecret status and events
+kubectl describe sealedsecret leave-system-leave-management-system-secrets -n production
 
-# Check external secrets status
-kubectl get externalsecret -n production
-kubectl describe externalsecret leave-system-secrets -n production
+# Check controller logs for decryption errors
+kubectl logs -n kube-system -l app.kubernetes.io/name=sealed-secrets
+
+# Verify the resulting plain Secret was created
+kubectl get secret -n production | grep leave-management
+
+# Check secret content (for debugging only)
+kubectl get secret leave-system-leave-management-system-secrets -n production -o yaml
 ```
+
+Common errors:
+- `no key could decrypt` → SealedSecret was encrypted for a different cluster. Re-encrypt.
+- `namespace mismatch` → Ensure the plain secret's `namespace` matches the target namespace before encrypting.
+- Controller not running → `kubectl get pods -n kube-system -l app.kubernetes.io/name=sealed-secrets`
 
 ## 🛡️ Security Best Practices
 
@@ -356,14 +416,20 @@ secrets/
 *.pem
 ```
 
-### 2. Use External Secrets in Production
+### 2. Use Sealed Secrets in Production
 
-```yaml
-backend:
-  secrets:
-    externalSecrets: true
-    externalSecretsName: leave-secrets-production
+Seal your secrets with `kubeseal` before committing to Git:
+
+```bash
+kubeseal \
+  --controller-name=sealed-secrets-controller \
+  --controller-namespace=kube-system \
+  --format=yaml \
+  < plain-secret.yaml
+# Copy encryptedData values into values-prod.yaml -> backend.secrets.sealedSecretsData
 ```
+
+See [SEALED_SECRETS_SETUP.md](./SEALED_SECRETS_SETUP.md) for full details.
 
 ### 3. Enable Pod Security Policies
 

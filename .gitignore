@@ -39,3 +39,13 @@ docker-compose.override.yml
 
 # Backend Specific
 backend/node_modules/
+
+# Secrets — NEVER commit plain-text secrets
+plain-secret*.yaml
+plain-secret*.json
+*-plain-secret.*
+values-secrets.yaml
+secrets/
+*.pem
+# Exception: pub-sealed-secrets.pem is safe to commit (public key only)
+!pub-sealed-secrets.pem

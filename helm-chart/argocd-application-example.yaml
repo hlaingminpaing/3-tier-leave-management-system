@@ -1,72 +1,90 @@
-# Example ArgoCD Application for GitOps Deployment
-# This demonstrates best practices for GitOps with the leave management system
+# ArgoCD Applications for Leave Management System
+# GitOps flow with Helm-managed SealedSecrets
+#
+# PREREQUISITE: Install sealed-secrets controller in kube-system BEFORE applying these apps:
+#   helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+#   helm install sealed-secrets sealed-secrets/sealed-secrets \
+#     --namespace kube-system \
+#     --set fullnameOverride=sealed-secrets-controller
+#
+# Secrets flow:
+#   1. kubeseal encrypts plain-secret.yaml  →  encrypted values
+#   2. Paste into helm-chart/values-prod.yaml under backend.secrets.sealedSecretsData
+#   3. git push  →  ArgoCD syncs  →  Helm renders SealedSecret resource
+#   4. sealed-secrets-controller decrypts  →  creates plain Secret in cluster
+#   5. Backend pod reads DB credentials via secretKeyRef  ✅
+#
+# See helm-chart/SEALED_SECRETS_SETUP.md for the full step-by-step guide.
 
 ---
-# Production ArgoCD Application
+# ══════════════════════════════════════════════════════════════════════════════
+# Production Application
+# ══════════════════════════════════════════════════════════════════════════════
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: leave-system-prod
   namespace: argocd
+  annotations:
+    # Notify on sync failures
+    notifications.argoproj.io/subscribe.on-sync-failed.slack: alerts
 spec:
-  # Reference to the ArgoCD project
   project: default
-  
+
   source:
-    # Git repository containing the Helm chart
-    repoURL: https://github.com/your-org/3tier-leave-system
+    # !! Replace with your actual repository URL
+    repoURL: https://github.com/hlaingminpaing/3-tier-leave-management-system
     targetRevision: main
     path: helm-chart
-    
-    # Helm specific configuration
+
     helm:
       releaseName: leave-system
-      # Values files are applied in order
+      # Values files applied in order — later files override earlier ones
       valuesFiles:
-        - values.yaml           # Base values
-        - values-prod.yaml      # Production-specific overrides
-      # Alternative: inline values
-      # values: |
-      #   backend:
-      #     image:
-      #       tag: v1.2.3
-  
-  # Destination cluster and namespace
+        - values.yaml           # Base defaults
+        - values-prod.yaml      # Production overrides (sealedSecretsData encrypted here)
+
   destination:
     server: https://kubernetes.default.svc
     namespace: production
-  
-  # Sync policy for GitOps
+
   syncPolicy:
-    # Automated sync settings
     automated:
-      prune: true           # Delete resources not in Git
-      selfHeal: true        # Auto-sync when cluster diverges
-      allow:
-        empty: false        # Prevent deletion of entire applications
-    
+      prune: true       # Delete resources removed from Git
+      selfHeal: true    # Re-sync if cluster drifts from Git state
+      allowEmpty: false # Prevent accidental full-app deletion
+
     syncOptions:
-      - CreateNamespace=true  # Create namespace if missing
+      - CreateNamespace=true            # Create production namespace if missing
       - PrunePropagationPolicy=foreground
       - RespectIgnoreDifferences=true
-    
-    # Manual sync can be triggered via: argocd app sync leave-system-prod
-    # retry:
-    #   limit: 5
-    #   backoff:
-    #     duration: 5s
-    #     factor: 2
-    #     maxDuration: 3m
-  
-  # Optional: Health assessment rules
-  # ignoreDifferences:
-  # - group: apps
-  #   kind: Deployment
-  #   jsonPointers:
-  #   - /spec/replicas
+      - ServerSideApply=true            # Required for SealedSecret CRD
+
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+
+  # ── Ignore differences that change after apply ──────────────────────────────
+  # The sealed-secrets controller adds/updates fields on SealedSecret after
+  # ArgoCD applies it. Without this, ArgoCD shows the app as always OutOfSync.
+  ignoreDifferences:
+    - group: bitnami.com
+      kind: SealedSecret
+      jsonPointers:
+        - /spec/encryptedData  # controller may reorder keys
+        - /metadata/annotations
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas       # HPA manages replicas at runtime
 
 ---
-# Staging ArgoCD Application
+# ══════════════════════════════════════════════════════════════════════════════
+# Staging Application
+# ══════════════════════════════════════════════════════════════════════════════
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -74,31 +92,41 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  
+
   source:
-    repoURL: https://github.com/your-org/3tier-leave-system
+    repoURL: https://github.com/hlaingminpaing/3-tier-leave-management-system
     targetRevision: staging
     path: helm-chart
-    
+
     helm:
       releaseName: leave-system
       valuesFiles:
         - values.yaml
         - values-staging.yaml
-  
+
   destination:
     server: https://kubernetes.default.svc
     namespace: staging
-  
+
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
     syncOptions:
       - CreateNamespace=true
+      - ServerSideApply=true
+
+  ignoreDifferences:
+    - group: bitnami.com
+      kind: SealedSecret
+      jsonPointers:
+        - /spec/encryptedData
+        - /metadata/annotations
 
 ---
-# Development ArgoCD Application
+# ══════════════════════════════════════════════════════════════════════════════
+# Development Application
+# ══════════════════════════════════════════════════════════════════════════════
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -106,25 +134,27 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  
+
   source:
-    repoURL: https://github.com/your-org/3tier-leave-system
+    repoURL: https://github.com/hlaingminpaing/3-tier-leave-management-system
     targetRevision: develop
     path: helm-chart
-    
+
     helm:
       releaseName: leave-system
       valuesFiles:
         - values.yaml
         - values-dev.yaml
-  
+      # Dev uses inline secrets (plain Secret, not SealedSecret)
+      # values-dev.yaml has sealedSecrets: false → inline mode is active
+
   destination:
     server: https://kubernetes.default.svc
     namespace: default
-  
+
   syncPolicy:
     automated:
-      prune: false        # Don't auto-prune in dev
-      selfHeal: false     # Manual control for development
+      prune: false      # Don't auto-prune in dev — manual control
+      selfHeal: false   # Manual sync for development iteration
     syncOptions:
       - CreateNamespace=true

@@ -24,22 +24,24 @@ This Helm chart provides a production-ready deployment configuration for:
 
 ```
 helm-chart/
-├── Chart.yaml                 # Chart metadata
-├── values.yaml                # Default values
-├── values-dev.yaml           # Development overrides
-├── values-staging.yaml        # Staging overrides
-├── values-prod.yaml          # Production overrides
+├── Chart.yaml                    # Chart metadata
+├── values.yaml                   # Default values (all modes documented)
+├── values-dev.yaml               # Development overrides
+├── values-staging.yaml           # Staging overrides
+├── values-prod.yaml              # Production overrides (Sealed Secrets enabled)
+├── SEALED_SECRETS_SETUP.md       # Step-by-step Sealed Secrets guide ⭐
+├── DEPLOYMENT_GUIDE.md           # Full deployment guide
+├── GITOPS_BEST_PRACTICES.md      # GitOps patterns
 ├── templates/
-│   ├── _helpers.tpl           # Helper functions
+│   ├── _helpers.tpl              # Helper functions
 │   ├── backend-deployment.yaml
 │   ├── backend-service.yaml
 │   ├── backend-hpa.yaml
 │   ├── frontend-deployment.yaml
 │   ├── frontend-service.yaml
-│   ├── mysql-deployment.yaml
+│   ├── mysql-statefulset.yaml    # MySQL as StatefulSet
 │   ├── mysql-service.yaml
-│   ├── mysql-pvc.yaml
-│   ├── secrets.yaml
+│   ├── secrets.yaml              # Supports inline / SealedSecret / ExternalSecret
 │   ├── ingress.yaml
 │   ├── serviceaccount.yaml
 │   └── NOTES.txt
@@ -177,14 +179,17 @@ kubectl apply -f argocd-app.yaml
 
 ### Secrets Management
 
-Two approaches are supported:
+Three modes are supported. Choose **one** per environment.
 
-#### 1. Embedded Secrets (Development/Testing)
+#### Mode 1: Inline Secrets (Development / Local only)
+
+> ⚠️ Never use this in production — values are stored in plain text in `values.yaml`.
 
 ```yaml
 backend:
   secrets:
     externalSecrets: false
+    sealedSecrets: false
     inline:
       dbUser: root
       dbPassword: root
@@ -192,23 +197,75 @@ backend:
       rootPassword: root
 ```
 
-#### 2. External Secrets (Production) ⭐
+---
+
+#### Mode 2: Sealed Secrets (Recommended for Production ⭐)
+
+GitOps-safe: encrypted values are committed to Git and decrypted by a controller running in `kube-system`.
+
+**Quick setup:**
+
+```bash
+# 1. Install Sealed Secrets controller in kube-system
+helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+helm install sealed-secrets sealed-secrets/sealed-secrets \
+  --namespace kube-system \
+  --set fullnameOverride=sealed-secrets-controller
+
+# 2. Fetch the public certificate
+kubeseal --fetch-cert \
+  --controller-name=sealed-secrets-controller \
+  --controller-namespace=kube-system \
+  > pub-sealed-secrets.pem
+
+# 3. Create and encrypt your plain secret
+kubeseal \
+  --controller-name=sealed-secrets-controller \
+  --controller-namespace=kube-system \
+  --format=yaml \
+  < plain-secret.yaml \
+  > /dev/null  # only needed for standalone; for Helm use values approach
+```
+
+**Configure in `values-prod.yaml`:**
+
+```yaml
+backend:
+  secrets:
+    externalSecrets: false
+    sealedSecrets: true
+    sealedSecretsData:
+      db-user: AgB...        # kubeseal encrypted value
+      db-password: AgB...    # kubeseal encrypted value
+      jwt-secret: AgB...     # kubeseal encrypted value
+      root-password: AgB...  # kubeseal encrypted value
+      db-host: AgB...        # kubeseal encrypted value
+      db-name: AgB...        # kubeseal encrypted value
+```
+
+> 📖 See **[SEALED_SECRETS_SETUP.md](./SEALED_SECRETS_SETUP.md)** for the complete guide including
+> key rotation, offline CI/CD encryption, and troubleshooting.
+
+---
+
+#### Mode 3: External Secrets Operator (ESO)
+
+For AWS Secrets Manager / HashiCorp Vault / GCP Secret Manager:
 
 ```yaml
 backend:
   secrets:
     externalSecrets: true
     externalSecretsName: leave-secrets-production
+    sealedSecrets: false
 ```
-
-For production, use AWS Secrets Manager with External Secrets addon:
 
 ```bash
 # Install External Secrets addon
 helm repo add external-secrets https://charts.external-secrets.io
 helm install external-secrets external-secrets/external-secrets -n external-secrets-system
 
-# Create SecretStore
+# Apply ESO configuration
 kubectl apply -f k8s-addational/eso-store.yaml
 kubectl apply -f k8s-addational/eso-secret.yaml
 ```
@@ -288,13 +345,14 @@ kubectl describe hpa leave-system-backend-hpa -n production
 
 ## Best Practices for GitOps
 
-1. **Store sensitive data externally**: Use AWS Secrets Manager or HashiCorp Vault
-2. **Use sealed-secrets or external-secrets**: Never commit plain text secrets
+1. **Use Sealed Secrets for production**: Encrypt with `kubeseal` → commit safely to Git
+2. **Never commit plain text secrets**: Use `.gitignore` to exclude `*plain-secret*.yaml`
 3. **Version control values**: Commit environment-specific values files
 4. **Use ArgoCD for deployments**: Leverage Git as single source of truth
 5. **Monitor deployments**: Use the included observability stack (Prometheus, Loki, Tempo)
-6. **Health checks**: Define proper liveness and readiness probes
-7. **Resource quotas**: Set requests and limits for all containers
+6. **Health checks**: Liveness/readiness probes are configured with conservative delays
+7. **Resource quotas**: Requests and limits are set for all containers
+8. **MySQL as StatefulSet**: Provides stable storage and ordered pod lifecycle
 
 ## Example ArgoCD Integration
 

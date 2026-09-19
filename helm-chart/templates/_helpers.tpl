@@ -58,3 +58,18 @@ Create the name of the service account to use
 {{- default "default" .Values.serviceAccount.name }}
 {{- end }}
 {{- end }}
+
+{{/*
+Resolve the secret name to use for DB credentials.
+Priority: existingSecret > externalSecretsName > chart-managed secret
+This means zero secret values are needed in values.yaml when using existingSecret.
+*/}}
+{{- define "leave-management-system.secretName" -}}
+{{- if .Values.backend.secrets.existingSecret -}}
+{{- .Values.backend.secrets.existingSecret -}}
+{{- else if .Values.backend.secrets.externalSecrets -}}
+{{- .Values.backend.secrets.externalSecretsName -}}
+{{- else -}}
+{{- include "leave-management-system.fullname" . }}-secrets
+{{- end -}}
+{{- end }}
