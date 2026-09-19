@@ -54,52 +54,61 @@ function metricsMiddleware(req, res, next) {
         // Track original res.end to capture response metrics
         const originalEnd = res.end;
         res.end = function(chunk, encoding) {
-            // Calculate latency
-            const latency = (Date.now() - startTime) / 1000;
-            requestLatencyHistogram.record(latency, {
-                method: req.method,
-                endpoint: req.path,
-                status: res.statusCode,
-            });
-
-            // Record response size
-            if (chunk) {
-                const responseSize = Buffer.byteLength(chunk, encoding);
-                responseSizeHistogram.record(responseSize, {
-                    method: req.method,
-                    endpoint: req.path,
-                });
-            }
-
-            // Record HTTP errors
-            if (res.statusCode >= 400) {
-                httpErrorsCounter.add(1, {
+            try {
+                // Calculate latency
+                const latency = (Date.now() - startTime) / 1000;
+                requestLatencyHistogram.record(latency, {
                     method: req.method,
                     endpoint: req.path,
                     status: res.statusCode,
                 });
+
+                // Record response size
+                let responseSize = 0;
+                if (chunk) {
+                    try {
+                        responseSize = Buffer.isBuffer(chunk) ? chunk.length : Buffer.byteLength(chunk.toString(), encoding);
+                        responseSizeHistogram.record(responseSize, {
+                            method: req.method,
+                            endpoint: req.path,
+                        });
+                    } catch (e) {
+                        // ignore sizing error
+                    }
+                }
+
+                // Record HTTP errors
+                if (res.statusCode >= 400) {
+                    httpErrorsCounter.add(1, {
+                        method: req.method,
+                        endpoint: req.path,
+                        status: res.statusCode,
+                    });
+                }
+
+                // Record request count
+                requestsPerEndpointCounter.add(1, {
+                    method: req.method,
+                    endpoint: req.path,
+                    status: res.statusCode,
+                });
+
+                requestsByMethodCounter.add(1, {
+                    method: req.method,
+                });
+
+                // End span with status
+                span.setAttributes({
+                    'http.status_code': res.statusCode,
+                    'http.response_content_length': responseSize || 0,
+                });
+                span.end();
+            } catch (err) {
+                // Never allow metrics recording to break HTTP responses
             }
 
-            // Record request count
-            requestsPerEndpointCounter.add(1, {
-                method: req.method,
-                endpoint: req.path,
-                status: res.statusCode,
-            });
-
-            requestsByMethodCounter.add(1, {
-                method: req.method,
-            });
-
-            // End span with status
-            span.setAttributes({
-                'http.status_code': res.statusCode,
-                'http.response_content_length': responseSize || 0,
-            });
-            span.end();
-
             // Call original end
-            originalEnd.call(this, chunk, encoding);
+            return originalEnd.call(this, chunk, encoding);
         };
 
         next();
