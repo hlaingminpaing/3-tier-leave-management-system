@@ -13,7 +13,7 @@ frontend:
   
   image:
     repository: registry.gitlab.com/hlaingminpaing/3-tier-leave-management-system/frontend
-    tag: sha-e2ac005
+    tag: v1.0.2
     pullPolicy: Always
   
   service:
@@ -43,7 +43,7 @@ backend:
   
   image:
     repository: registry.gitlab.com/hlaingminpaing/3-tier-leave-management-system/backend
-    tag: sha-e2ac005
+    tag: v1.0.2
     pullPolicy: Always
   
   service:
