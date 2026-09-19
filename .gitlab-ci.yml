@@ -129,18 +129,29 @@ update_helm_values:
     - git checkout $CI_DEFAULT_BRANCH
   script:
     - |
-      # Update backend image tag: find line after "repository: .../backend" and replace tag value
-      sed -i "/repository: ${IMAGE_PREFIX}\/backend/{n;s/tag:.*/tag: ${CI_COMMIT_TAG}/}" helm-chart/values.yaml
-      # Update frontend image tag: find line after "repository: .../frontend" and replace tag value
-      sed -i "/repository: ${IMAGE_PREFIX}\/frontend/{n;s/tag:.*/tag: ${CI_COMMIT_TAG}/}" helm-chart/values.yaml
+      echo "==> Updating image tags to ${CI_COMMIT_TAG} in helm-chart/values.yaml"
+
+      # IMAGE_PREFIX contains slashes (registry.gitlab.com/user/project)
+      # so we use \| as the sed address delimiter instead of /
+      # GNU sed supports: \cregexpc where c = any char (here: |)
+
+      # Update backend image tag
+      sed -i "\|repository: ${IMAGE_PREFIX}/backend|{n;s|tag:.*|tag: ${CI_COMMIT_TAG}|}" helm-chart/values.yaml
+
+      # Update frontend image tag
+      sed -i "\|repository: ${IMAGE_PREFIX}/frontend|{n;s|tag:.*|tag: ${CI_COMMIT_TAG}|}" helm-chart/values.yaml
+
+      echo "==> Current values.yaml image tags after update:"
+      grep -A1 "repository: ${IMAGE_PREFIX}" helm-chart/values.yaml || true
+
       if git diff --quiet; then
         echo "No changes detected in helm-chart/values.yaml. Skipping commit."
       else
         echo "==> Committing updated image tags"
         git add helm-chart/values.yaml
-        git commit -m "chore: update image tags to $CI_COMMIT_TAG [skip ci]"
+        git commit -m "chore: update image tags to ${CI_COMMIT_TAG} [skip ci]"
         git push origin $CI_DEFAULT_BRANCH
-        echo "==> Done. ArgoCD will now detect the change and deploy $CI_COMMIT_TAG"
+        echo "==> Done. ArgoCD will now detect the change and deploy ${CI_COMMIT_TAG}"
       fi
   rules:
     # Only update values when a tag is created
