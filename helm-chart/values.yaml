@@ -151,7 +151,7 @@ mysql:
   persistence:
     enabled: true
     size: 1Gi
-    storageClassName: ""  # Use default storage class
+    storageClassName: "gp2"  # Use default storage class
     # Force access mode for persistence
     accessMode: ReadWriteOnce
   
@@ -167,11 +167,11 @@ ingress:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/healthcheck-path: /health
     # IMPORTANT: Set your ACM certificate ARN
-    alb.ingress.kubernetes.io/certificate-arn: ""
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-southeast-1:268145348964:certificate/abefd3e5-fe3e-4230-a100-8bdcfffff719"
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
     alb.ingress.kubernetes.io/ssl-redirect: '443'
   
-  host: "leave.example.com"
+  # host: "leaveapp.myanmartechacademy.com"
   paths:
     - path: /api
       pathType: Prefix
@@ -196,7 +196,7 @@ autoscaling:
 
 # Service Monitor for Prometheus (optional)
 serviceMonitor:
-  enabled: false
+  enabled: true
   interval: 30s
   scrapeTimeout: 10s
 
