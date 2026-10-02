@@ -12,7 +12,7 @@ spec:
     helm:
       releaseName: leave-management-system
       valueFiles:
-        - values.yaml
+        - values-dev.yaml
   destination:
     server: 'https://kubernetes.default.svc'
     namespace: default
