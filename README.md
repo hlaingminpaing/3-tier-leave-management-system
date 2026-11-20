@@ -414,69 +414,70 @@ VPC: leave-system-vpc
 
 Store sensitive configuration in AWS Systems Manager Parameter Store.
 
-### 6.1 Create Parameters
+### 6.1 Create the Parameter
 
-1. **Navigate to Systems Manager → Parameter Store**
+All backend configuration is stored in **one** SecureString parameter as JSON. The EC2 user data reads it with a single API call and writes the backend `.env` file from it.
 
-2. **Create the following parameters** (one by one):
+1. **Navigate to Systems Manager → Parameter Store → Create parameter**
 
-#### Database Host
+2. **Create the parameter:**
 ```
-Name: /leave-app/production/DB_HOST
+Name: /leave-app/production/config
+Tier: Standard
 Type: SecureString
-KMS key source: My current account
-Value: leave-system-db.xxxxxxxxx.ap-southeast-7.rds.amazonaws.com
-Description: RDS MySQL endpoint
+KMS key source: My current account (alias/aws/ssm)
+Description: Leave app backend configuration (DB + JWT)
+Value: (JSON below)
 ```
 
-#### Database User
-```
-Name: /leave-app/production/DB_USER
-Type: SecureString
-Value: admin
-Description: RDS master username
-```
-
-#### Database Password
-```
-Name: /leave-app/production/DB_PASS
-Type: SecureString
-Value: [Your RDS master password]
-Description: RDS master password
+```json
+{
+  "DB_HOST": "leave-system-db.xxxxxxxxx.ap-southeast-7.rds.amazonaws.com",
+  "DB_USER": "admin",
+  "DB_PASS": "YOUR_RDS_MASTER_PASSWORD",
+  "DB_NAME": "leave_db",
+  "JWT_SECRET": "YOUR_RANDOM_64_CHAR_SECRET"
+}
 ```
 
-#### Database Name
-```
-Name: /leave-app/production/DB_NAME
-Type: SecureString
-Value: leave_db
-Description: Database name
-```
-
-#### JWT Secret
-```
-Name: /leave-app/production/JWT_SECRET
-Type: SecureString
-Value: [Generate a random 64-character string]
-Description: JWT signing secret
-```
+| Key | Description |
+|-----|-------------|
+| `DB_HOST` | RDS MySQL endpoint |
+| `DB_USER` | RDS master username |
+| `DB_PASS` | RDS master password |
+| `DB_NAME` | Database name |
+| `JWT_SECRET` | JWT signing secret |
 
 **Generate JWT Secret:**
 ```bash
 # On Linux/Mac
-openssl rand -base64 64
+openssl rand -base64 64 | tr -d '\n'
 
 # On Windows PowerShell
 [Convert]::ToBase64String((1..64 | ForEach-Object { Get-Random -Maximum 256 }))
 ```
 
-#### API URL (for Frontend)
+**Or create it with the AWS CLI:**
+```bash
+aws ssm put-parameter \
+  --region ap-southeast-7 \
+  --name "/leave-app/production/config" \
+  --type SecureString \
+  --overwrite \
+  --value '{
+    "DB_HOST": "leave-system-db.xxxxxxxxx.ap-southeast-7.rds.amazonaws.com",
+    "DB_USER": "admin",
+    "DB_PASS": "YOUR_RDS_MASTER_PASSWORD",
+    "DB_NAME": "leave_db",
+    "JWT_SECRET": "YOUR_RANDOM_64_CHAR_SECRET"
+  }'
 ```
-Name: /leave-app/production/API_URL
-Type: String
-Value: /api
-Description: Backend API base URL
-```
+
+> **Notes**
+> - The value must be valid JSON (escape `"` and `\` inside values). Validate it with `echo '<json>' | jq .` before saving.
+> - Standard tier SecureString values are limited to 4 KB, which is plenty for this config.
+> - To change a value later, update the JSON and restart the backend (`pm2 restart backend`) after regenerating `.env`, or relaunch the instance.
+> - The frontend API URL is not stored in SSM: it is set at build time with `VITE_API_URL="/api"` in the frontend user data.
 
 ---
 
@@ -510,12 +511,10 @@ Description: Backend API base URL
        {
          "Effect": "Allow",
          "Action": [
-           "ssm:GetParameter",
-           "ssm:GetParameters",
-           "ssm:GetParametersByPath"
+           "ssm:GetParameter"
          ],
          "Resource": [
-           "arn:aws:ssm:us-east-1:*:parameter/leave-app/*"
+           "arn:aws:ssm:ap-southeast-7:*:parameter/leave-app/production/config"
          ]
        },
        {
@@ -736,14 +735,17 @@ Description: Backend API base URL
    # Install dependencies
    npm install
 
-   # Fetch secrets from SSM Parameter Store
+   # Fetch all secrets from ONE SSM parameter (JSON)
    export AWS_DEFAULT_REGION=ap-southeast-7
+   dnf install -y jq
 
-   DB_HOST=$(aws ssm get-parameter --name "/leave-app/production/DB_HOST" --with-decryption --query "Parameter.Value" --output text)
-   DB_USER=$(aws ssm get-parameter --name "/leave-app/production/DB_USER" --with-decryption --query "Parameter.Value" --output text)
-   DB_PASS=$(aws ssm get-parameter --name "/leave-app/production/DB_PASS" --with-decryption --query "Parameter.Value" --output text)
-   DB_NAME=$(aws ssm get-parameter --name "/leave-app/production/DB_NAME" --with-decryption --query "Parameter.Value" --output text)
-   JWT_SECRET=$(aws ssm get-parameter --name "/leave-app/production/JWT_SECRET" --with-decryption --query "Parameter.Value" --output text)
+   CONFIG_JSON=$(aws ssm get-parameter --name "/leave-app/production/config" --with-decryption --query "Parameter.Value" --output text)
+
+   DB_HOST=$(echo "$CONFIG_JSON" | jq -r '.DB_HOST')
+   DB_USER=$(echo "$CONFIG_JSON" | jq -r '.DB_USER')
+   DB_PASS=$(echo "$CONFIG_JSON" | jq -r '.DB_PASS')
+   DB_NAME=$(echo "$CONFIG_JSON" | jq -r '.DB_NAME')
+   JWT_SECRET=$(echo "$CONFIG_JSON" | jq -r '.JWT_SECRET')
 
    # Create .env file with quoted values to handle special characters
    cat > .env << EOF
@@ -1107,7 +1109,8 @@ If targets are unhealthy:
 
 4. **Verify SSM Parameters**
    ```
-   aws ssm get-parameter --name "/leave-app/production/DB_HOST" --with-decryption
+   aws ssm get-parameter --name "/leave-app/production/config" --with-decryption \
+     --query "Parameter.Value" --output text | jq .
    ```
 
 ---
