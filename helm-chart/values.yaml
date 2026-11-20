@@ -109,6 +109,7 @@ backend:
 # MySQL configuration
 mysql:
   enabled: true
+  replicaCount: 1
   
   image:
     repository: mysql

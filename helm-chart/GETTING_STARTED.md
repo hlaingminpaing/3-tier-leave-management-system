@@ -34,9 +34,8 @@ helm-chart/
     ├── backend-hpa.yaml             # Auto-scaling config
     ├── frontend-deployment.yaml     # Frontend container
     ├── frontend-service.yaml        # Frontend service
-    ├── mysql-deployment.yaml        # Database container
+    ├── mysql-statefulset.yaml       # Database StatefulSet
     ├── mysql-service.yaml           # Database service
-    ├── mysql-pvc.yaml               # Storage configuration
     └── ingress.yaml                 # AWS ALB routing
 ```
 

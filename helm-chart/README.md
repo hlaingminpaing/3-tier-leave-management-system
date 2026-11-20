@@ -27,6 +27,7 @@ helm-chart/
 ├── Chart.yaml                 # Chart metadata
 ├── values.yaml                # Default values
 ├── values-dev.yaml           # Development overrides
+├── values-local.yaml          # Local overrides (storageClass: local-path)
 ├── values-staging.yaml        # Staging overrides
 ├── values-prod.yaml          # Production overrides
 ├── templates/
@@ -36,9 +37,8 @@ helm-chart/
 │   ├── backend-hpa.yaml
 │   ├── frontend-deployment.yaml
 │   ├── frontend-service.yaml
-│   ├── mysql-deployment.yaml
+│   ├── mysql-statefulset.yaml
 │   ├── mysql-service.yaml
-│   ├── mysql-pvc.yaml
 │   ├── secrets.yaml
 │   ├── ingress.yaml
 │   ├── serviceaccount.yaml

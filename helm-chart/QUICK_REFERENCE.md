@@ -25,9 +25,8 @@ helm-chart/
     ├── backend-hpa.yaml                # Horizontal Pod Autoscaler
     ├── frontend-deployment.yaml        # Frontend application pod
     ├── frontend-service.yaml           # Frontend service
-    ├── mysql-deployment.yaml           # Database pod
+    ├── mysql-statefulset.yaml          # Database StatefulSet
     ├── mysql-service.yaml              # Database service
-    ├── mysql-pvc.yaml                  # Persistent Volume Claim
     └── ingress.yaml                    # AWS ALB Ingress
 ```
 

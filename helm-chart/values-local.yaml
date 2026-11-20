@@ -1,0 +1,64 @@
+# Local environment values override
+# Usage: helm install leave-system . -f values.yaml -f values-local.yaml
+
+global:
+  namespace: default
+  environment: local
+
+frontend:
+  replicaCount: 1
+  image:
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "100m"
+      memory: "128Mi"
+
+backend:
+  replicaCount: 1
+  image:
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  secrets:
+    externalSecrets: false
+    inline:
+      dbUser: "root"
+      dbPassword: "root"
+      jwtSecret: "super-secure-jwt-secret-key"
+      rootPassword: "root"
+  autoscaling:
+    enabled: false
+
+mysql:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "250m"
+      memory: "256Mi"
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClassName: "local-path"
+    accessMode: ReadWriteOnce
+
+ingress:
+  enabled: false
+
+# Service Account
+serviceAccount:
+  create: true
+  name: leave-system-sa
