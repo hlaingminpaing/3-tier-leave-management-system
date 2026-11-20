@@ -416,7 +416,7 @@ Store sensitive configuration in AWS Systems Manager Parameter Store.
 
 ### 6.1 Create the Parameter
 
-All backend configuration is stored in **one** SecureString parameter as JSON. The EC2 user data reads it with a single API call and writes the backend `.env` file from it.
+All application configuration (database, JWT secret and API route) is stored in **one** SecureString parameter as JSON. Both the backend and frontend user data read it with a single API call.
 
 1. **Navigate to Systems Manager → Parameter Store → Create parameter**
 
@@ -426,7 +426,7 @@ Name: /leave-app/production/config
 Tier: Standard
 Type: SecureString
 KMS key source: My current account (alias/aws/ssm)
-Description: Leave app backend configuration (DB + JWT)
+Description: Leave app configuration (DB, JWT secret, API route)
 Value: (JSON below)
 ```
 
@@ -436,7 +436,8 @@ Value: (JSON below)
   "DB_USER": "admin",
   "DB_PASS": "YOUR_RDS_MASTER_PASSWORD",
   "DB_NAME": "leave_db",
-  "JWT_SECRET": "YOUR_RANDOM_64_CHAR_SECRET"
+  "JWT_SECRET": "YOUR_RANDOM_64_CHAR_SECRET",
+  "API_URL": "/api"
 }
 ```
 
@@ -447,6 +448,7 @@ Value: (JSON below)
 | `DB_PASS` | RDS master password |
 | `DB_NAME` | Database name |
 | `JWT_SECRET` | JWT signing secret |
+| `API_URL` | Frontend API base route, baked into the build as `VITE_API_URL` (use `/api` for ALB/Nginx routing) |
 
 **Generate JWT Secret:**
 ```bash
@@ -469,15 +471,17 @@ aws ssm put-parameter \
     "DB_USER": "admin",
     "DB_PASS": "YOUR_RDS_MASTER_PASSWORD",
     "DB_NAME": "leave_db",
-    "JWT_SECRET": "YOUR_RANDOM_64_CHAR_SECRET"
+    "JWT_SECRET": "YOUR_RANDOM_64_CHAR_SECRET",
+    "API_URL": "/api"
   }'
 ```
 
 > **Notes**
 > - The value must be valid JSON (escape `"` and `\` inside values). Validate it with `echo '<json>' | jq .` before saving.
 > - Standard tier SecureString values are limited to 4 KB, which is plenty for this config.
-> - To change a value later, update the JSON and restart the backend (`pm2 restart backend`) after regenerating `.env`, or relaunch the instance.
-> - The frontend API URL is not stored in SSM: it is set at build time with `VITE_API_URL="/api"` in the frontend user data.
+> - To change a DB or JWT value later, update the JSON and relaunch backend instances (or regenerate `.env` and run `pm2 restart backend`).
+> - `API_URL` is used at **build time**, so changing it requires rebuilding the frontend (relaunch frontend instances).
+> - Both backend and frontend instances use `LeaveApp-EC2-Role`, so both can read this parameter.
 
 ---
 
@@ -885,7 +889,7 @@ USE leave_db;
 
    # Install Node.js 22 (Vite requires Node 20+)
    curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-   dnf install -y nodejs git nginx
+   dnf install -y nodejs git nginx jq
 
    # Create application directory
    cd /home/ec2-user
@@ -897,8 +901,10 @@ USE leave_db;
    # Install dependencies
    npm install
 
-   # Set API URL for build (relative path for ALB routing)
-   export VITE_API_URL="/api"
+   # Read API route from the shared SSM config parameter (fallback: /api)
+   export AWS_DEFAULT_REGION=ap-southeast-7
+   CONFIG_JSON=$(aws ssm get-parameter --name "/leave-app/production/config" --with-decryption --query "Parameter.Value" --output text)
+   export VITE_API_URL=$(echo "$CONFIG_JSON" | jq -r '.API_URL // "/api"')
 
    # Build production bundle
    npm run build

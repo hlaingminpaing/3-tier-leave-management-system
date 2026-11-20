@@ -11,23 +11,29 @@ REPO_URL=https://github.com/hlaingminpaing/3-tier-leave-management-system.git
 # ---------- System packages ----------
 dnf update -y
 curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-dnf install -y nodejs git nginx mariadb105
+dnf install -y nodejs git nginx mariadb105 jq
 
 # ---------- Clone repo (once) ----------
 if [ ! -d "$APP_DIR" ]; then
   git clone "$REPO_URL" "$APP_DIR"
 fi
 
-# ---------- Fetch secrets from SSM ----------
-get_param() {
-  aws ssm get-parameter --name "/leave-app/production/$1" --with-decryption \
-    --query "Parameter.Value" --output text
-}
-DB_HOST=$(get_param DB_HOST)
-DB_USER=$(get_param DB_USER)
-DB_PASS=$(get_param DB_PASS)
-DB_NAME=$(get_param DB_NAME)
-JWT_SECRET=$(get_param JWT_SECRET)
+# ---------- Fetch all secrets from ONE SSM parameter (JSON) ----------
+CONFIG_JSON=$(aws ssm get-parameter --name "/leave-app/production/config" --with-decryption \
+  --query "Parameter.Value" --output text)
+
+DB_HOST=$(echo "$CONFIG_JSON" | jq -r '.DB_HOST')
+DB_USER=$(echo "$CONFIG_JSON" | jq -r '.DB_USER')
+DB_PASS=$(echo "$CONFIG_JSON" | jq -r '.DB_PASS')
+DB_NAME=$(echo "$CONFIG_JSON" | jq -r '.DB_NAME')
+JWT_SECRET=$(echo "$CONFIG_JSON" | jq -r '.JWT_SECRET')
+
+for v in DB_HOST DB_USER DB_PASS DB_NAME JWT_SECRET; do
+  if [ -z "${!v}" ] || [ "${!v}" = "null" ]; then
+    echo "ERROR: $v missing from /leave-app/production/config" >&2
+    exit 1
+  fi
+done
 
 # ---------- Backend ----------
 cd "$APP_DIR/backend"
