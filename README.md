@@ -14,11 +14,10 @@ Complete guide to deploy the Leave Management System on AWS using a production-r
 6. [Secrets Management (SSM Parameter Store)](#6-secrets-management-ssm-parameter-store)
 7. [IAM Roles and Policies](#7-iam-roles-and-policies)
 8. [Application Load Balancer Setup](#8-application-load-balancer-setup)
-9. [Backend Tier Deployment](#9-backend-tier-deployment)
-10. [Frontend Tier Deployment](#10-frontend-tier-deployment)
-11. [Auto Scaling Configuration](#11-auto-scaling-configuration)
-12. [Testing and Validation](#12-testing-and-validation)
-13. [Monitoring and Maintenance](#13-monitoring-and-maintenance)
+9. [Application Tier Deployment (Frontend + Backend on One EC2)](#9-application-tier-deployment-frontend--backend-on-one-ec2)
+10. [Auto Scaling Configuration](#10-auto-scaling-configuration)
+11. [Testing and Validation](#11-testing-and-validation)
+12. [Monitoring and Maintenance](#12-monitoring-and-maintenance)
 
 ---
 
@@ -38,8 +37,8 @@ Application Load Balancer (ALB)
     ↓
 ┌─────────────────────────────────────────────────┐
 │  Private App Subnets (2 AZs)                    │
-│  - Frontend ASG (Nginx + React)                 │
-│  - Backend ASG (Node.js)                        │
+│  - App ASG: each EC2 runs                       │
+│      Nginx (React build) + Node.js API (PM2)    │
 └─────────────────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────────────────┐
@@ -50,8 +49,9 @@ Application Load Balancer (ALB)
 
 ### Traffic Flow
 
-- **Frontend**: `http://alb-dns-name.elb.amazonaws.com/` → Frontend Target Group (Port 80)
-- **Backend API**: `http://alb-dns-name.elb.amazonaws.com/api/*` → Backend Target Group (Port 3000)
+- **All traffic**: `http://alb-dns-name.elb.amazonaws.com/*` → App Target Group (Port 80) → Nginx on each EC2
+- **Frontend**: Nginx serves the React build for `/`
+- **Backend API**: Nginx proxies `/api/*` to the local Node.js backend on port `3000`. Port 3000 is not opened in the security group, so the backend is only reachable through Nginx
 
 ### High Availability
 
@@ -241,7 +241,7 @@ VPC: leave-system-vpc
 
 ## 4. Security Groups Configuration
 
-Create **4 security groups** with least-privilege access:
+Create **3 security groups** with least-privilege access:
 
 ### 4.1 ALB Security Group
 
@@ -262,11 +262,13 @@ VPC: leave-system-vpc
 |------|----------|------|-------------|-------------|
 | All traffic | All | All | 0.0.0.0/0 | Allow all outbound |
 
-### 4.2 Frontend Security Group
+### 4.2 App Security Group
+
+Used by the EC2 instances that run both the frontend (Nginx) and backend (Node.js).
 
 ```
-Name: leave-system-frontend-sg
-Description: Security group for Frontend EC2 instances
+Name: leave-system-app-sg
+Description: Security group for App EC2 instances (frontend + backend)
 VPC: leave-system-vpc
 ```
 
@@ -276,31 +278,14 @@ VPC: leave-system-vpc
 | HTTP | TCP | 80 | leave-system-alb-sg | Allow HTTP from ALB |
 | SSH | TCP | 22 | Your-IP/32 | SSH access (optional, for debugging) |
 
-**Outbound Rules:**
-| Type | Protocol | Port | Destination | Description |
-|------|----------|------|-------------|-------------|
-| All traffic | All | All | 0.0.0.0/0 | Allow all outbound |
-
-### 4.3 Backend Security Group
-
-```
-Name: leave-system-backend-sg
-Description: Security group for Backend EC2 instances
-VPC: leave-system-vpc
-```
-
-**Inbound Rules:**
-| Type | Protocol | Port | Source | Description |
-|------|----------|------|--------|-------------|
-| Custom TCP | TCP | 3000 | leave-system-alb-sg | Allow API traffic from ALB |
-| SSH | TCP | 22 | Your-IP/32 | SSH access (optional, for debugging) |
+> Port `3000` is **not** opened. The backend runs on port 3000, but the ALB only talks to Nginx on port 80, and Nginx forwards to the backend inside the instance.
 
 **Outbound Rules:**
 | Type | Protocol | Port | Destination | Description |
 |------|----------|------|-------------|-------------|
 | All traffic | All | All | 0.0.0.0/0 | Allow all outbound |
 
-### 4.4 RDS Security Group
+### 4.3 RDS Security Group
 
 ```
 Name: leave-system-rds-sg
@@ -311,7 +296,7 @@ VPC: leave-system-vpc
 **Inbound Rules:**
 | Type | Protocol | Port | Source | Description |
 |------|----------|------|--------|-------------|
-| MySQL/Aurora | TCP | 3306 | leave-system-backend-sg | Allow MySQL from backend |
+| MySQL/Aurora | TCP | 3306 | leave-system-app-sg | Allow MySQL from app instances |
 
 **Outbound Rules:**
 | Type | Protocol | Port | Destination | Description |
@@ -477,7 +462,7 @@ aws ssm put-parameter \
 ```
 
 > **Notes**
-> - The value must be valid JSON (escape `"` and `\` inside values). Validate it with `echo '<json>' | jq .` before saving.
+> - The value must be valid JSON (escape `"` and `\` inside values). Validate it with `echo '<json>' | python3 -m json.tool` before saving.
 > - Standard tier SecureString values are limited to 4 KB, which is plenty for this config.
 > - To change a DB or JWT value later, update the JSON and relaunch backend instances (or regenerate `.env` and run `pm2 restart backend`).
 > - `API_URL` is used at **build time**, so changing it requires rebuilding the frontend (relaunch frontend instances).
@@ -547,18 +532,18 @@ aws ssm put-parameter \
 
 ## 8. Application Load Balancer Setup
 
-### 8.1 Create Target Groups
+### 8.1 Create Target Group
 
-#### Target Group 1: Backend
+One target group is enough: every instance serves the frontend and proxies the API through Nginx on port 80.
 
 1. **Navigate to EC2 → Target Groups → Create target group**
 
 2. **Configuration**
    ```
    Target type: Instances
-   Target group name: leave-system-backend-tg
+   Target group name: leave-system-app-tg
    Protocol: HTTP
-   Port: 3000
+   Port: 80
    VPC: leave-system-vpc
    Protocol version: HTTP1
    ```
@@ -574,36 +559,17 @@ aws ssm put-parameter \
      - Interval: 30 seconds
      - Success codes: 200
    ```
+   Why port 80 + `/health` covers both frontend and backend even though the backend uses port 3000:
 
-4. **Create target group** (don't register targets yet)
+   | Situation | ALB request `GET :80/health` | Target status |
+   |-----------|------------------------------|---------------|
+   | Nginx + backend running | Nginx → `127.0.0.1:3000/health` → `OK` (200) | ✅ healthy |
+   | Backend (PM2) stopped/crashed | Nginx can't reach :3000 → **502** | ❌ unhealthy |
+   | Nginx stopped | connection refused on :80 | ❌ unhealthy |
 
-#### Target Group 2: Frontend
+   The React files are served by the same Nginx, so if Nginx answers, the frontend is being served too. You do **not** need a second target group on port 3000.
 
-1. **Create another target group**
-
-2. **Configuration**
-   ```
-   Target type: Instances
-   Target group name: leave-system-frontend-tg
-   Protocol: HTTP
-   Port: 80
-   VPC: leave-system-vpc
-   Protocol version: HTTP1
-   ```
-
-3. **Health Check Settings**
-   ```
-   Health check protocol: HTTP
-   Health check path: /
-   Advanced health check settings:
-     - Healthy threshold: 2
-     - Unhealthy threshold: 3
-     - Timeout: 5 seconds
-     - Interval: 30 seconds
-     - Success codes: 200
-   ```
-
-4. **Create target group**
+4. **Create target group** (don't register targets — the Auto Scaling Group registers instances automatically)
 
 ### 8.2 Create Application Load Balancer
 
@@ -637,7 +603,7 @@ aws ssm put-parameter \
    ```
    Protocol: HTTP
    Port: 80
-   Default action: Forward to leave-system-frontend-tg
+   Default action: Forward to leave-system-app-tg
    ```
 
 7. **Create Load Balancer**
@@ -647,181 +613,454 @@ aws ssm put-parameter \
 9. **Note the DNS Name**
    - Copy the DNS name (e.g., `leave-system-alb-1234567890.us-east-1.elb.amazonaws.com`)
 
-### 8.3 Configure Listener Rules
+### 8.3 Listener Rules
 
-1. **Select the ALB → Listeners tab**
+No extra path rules are needed. The default action forwards everything to `leave-system-app-tg`, and Nginx on each instance routes `/api/*` to the backend and everything else to the React app.
 
-2. **Click on the HTTP:80 listener → Manage rules**
-
-3. **Add Rules** (in order):
-
-   **Rule 1: Backend API Routing**
-   ```
-   Priority: 1
-   IF: Path is /api/*
-   THEN: Forward to leave-system-backend-tg
-   ```
-
-   **Default Rule: Frontend Routing**
-   ```
-   Already configured to forward to leave-system-frontend-tg
-   ```
-
-4. **Save rules**
+> If you later add HTTPS, create an `HTTPS:443` listener with an ACM certificate that forwards to `leave-system-app-tg`, and change the `HTTP:80` listener to redirect to HTTPS.
 
 ---
 
-## 9. Backend Tier Deployment
+## 9. Application Tier Deployment (Frontend + Backend on One EC2)
 
-### 9.1 Create Backend Launch Template
+Each EC2 instance runs the whole application:
+
+```
+ALB :80 ──► Nginx :80 (EC2)
+              ├── /            → React build (/usr/share/nginx/html)
+              ├── /api/*       → proxy → 127.0.0.1:3000/api/*  (Node.js, PM2)
+              └── /health      → proxy → 127.0.0.1:3000/health
+                                     │
+                                     ▼
+                                RDS MySQL (3306)
+```
+
+### 9.1 Create Launch Template
 
 1. **Navigate to EC2 → Launch Templates → Create launch template**
 
 2. **Launch Template Name and Description**
    ```
-   Launch template name: LeaveApp-Backend-LT
-   Template version description: Backend Node.js application v1
+   Launch template name: LeaveApp-App-LT
+   Template version description: Frontend (Nginx + React) + Backend (Node.js) v1
+   ✅ Provide guidance to help me set up a template that I can use with EC2 Auto Scaling
    ```
 
 3. **Application and OS Images (AMI)**
    ```
    Quick Start: Amazon Linux
-   Amazon Machine Image: Amazon Linux 2023 AMI (latest)
+   Amazon Machine Image: Amazon Linux 2023 AMI (latest)   # Amazon Linux 2 is also supported
    Architecture: 64-bit (x86)
    ```
 
 4. **Instance Type**
    ```
-   Instance type: t3.micro (or t3.small for better performance)
+   Instance type: t3.small (minimum — the frontend build needs ~1 GB RAM)
    ```
 
 5. **Key Pair**
    ```
-   Key pair name: Select your existing key pair (or create new)
+   Key pair name: Select your existing key pair (optional if you use Session Manager)
    ```
 
 6. **Network Settings**
    ```
    Subnet: Don't include in launch template (will be set by ASG)
    Firewall (security groups): Select existing security group
-     - leave-system-backend-sg
+     - leave-system-app-sg
    ```
 
 7. **Advanced Details**
-   
+
    **IAM Instance Profile:**
    ```
    IAM instance profile: LeaveApp-EC2-Role
    ```
 
    **User Data:**
-   
-   Replace `YOUR_GITHUB_USER` and `YOUR_REPO_NAME` with your actual values:
 
-   ```bash
-   #!/bin/bash
-   set -e
+   The same script is in the repo as [`userdata-single-ec2.sh`](userdata-single-ec2.sh). It works on **Amazon Linux 2023 and Amazon Linux 2**, and can also be run directly on an existing instance (see [9.4](#94-run-or-re-run-the-script-directly)). It reads all configuration (DB, JWT secret, API route) from the SSM parameter `/leave-app/production/config` created in [6.1](#61-create-the-parameter).
 
-   # Update system
-   dnf update -y
+```bash
+#!/bin/bash
+# =============================================================================
+# Leave Management System - single EC2 (frontend + backend on one instance)
+#
+#   Nginx :80  ├── /            -> React build (/usr/share/nginx/html)
+#              ├── API_URL/*    -> Node backend :3000/api/*   (PM2)
+#              └── /health      -> Node backend :3000/health  (ALB health check)
+#
+# Works on Amazon Linux 2023 and Amazon Linux 2.
+# Use it as EC2 user data, or run it directly (safe to re-run):
+#     sudo bash userdata-single-ec2.sh
+#
+# Optional overrides (env vars):
+#     AWS_REGION   (default ap-southeast-1)
+#     SSM_PARAM    (default /leave-app/production/config)
+#     REPO_BRANCH  (default main)
+#
+# SSM parameter value (SecureString, JSON):
+#   {"DB_HOST":"...","DB_USER":"admin","DB_PASS":"...","DB_NAME":"leave_db",
+#    "JWT_SECRET":"...","API_URL":"/api"}
+# Only port 80 needs to be open (ALB target group: HTTP 80, health check /health).
+# =============================================================================
+set -euo pipefail
 
-   # Install Node.js 22 (LTS)
-   curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-   dnf install -y nodejs git nginx
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Please run as root: sudo bash $0" >&2
+  exit 1
+fi
 
-   # Create application directory
-   cd /home/ec2-user
+exec > >(tee -a /var/log/user-data.log) 2>&1
+echo "===== $(date -u) : leave-app deploy start ====="
 
-   # Clone repository and checkout deploy/aws branch
-   git clone https://github.com/hlaingminpaing/3-tier-leave-management-system.git app
-   cd app/backend
+# cloud-init may not set HOME; npm and git need it
+export HOME="${HOME:-/root}"
+[ "$HOME" = "/" ] && export HOME=/root
 
-   # Install dependencies
-   npm install
+AWS_REGION="${AWS_REGION:-ap-southeast-1}"
+export AWS_DEFAULT_REGION="$AWS_REGION"
+SSM_PARAM="${SSM_PARAM:-/leave-app/production/config}"
+REPO_URL="https://github.com/hlaingminpaing/3-tier-leave-management-system.git"
+REPO_BRANCH="${REPO_BRANCH:-main}"
+APP_USER="ec2-user"
+APP_DIR="/home/${APP_USER}/app"
+NODE_MAJOR=22
 
-   # Fetch all secrets from ONE SSM parameter (JSON)
-   export AWS_DEFAULT_REGION=ap-southeast-7
-   dnf install -y jq
+# ---------- Detect OS ----------
+. /etc/os-release
+case "${VERSION_ID}" in
+  2023*) OS=al2023 ;;
+  2)     OS=al2 ;;
+  *) echo "ERROR: unsupported OS ${PRETTY_NAME:-unknown} (need Amazon Linux 2023 or 2)" >&2; exit 1 ;;
+esac
+echo "Detected OS: ${PRETTY_NAME} (${OS})"
 
-   CONFIG_JSON=$(aws ssm get-parameter --name "/leave-app/production/config" --with-decryption --query "Parameter.Value" --output text)
+node_major() { command -v node >/dev/null 2>&1 && node -v | sed 's/^v\([0-9]*\).*/\1/' || echo 0; }
 
-   DB_HOST=$(echo "$CONFIG_JSON" | jq -r '.DB_HOST')
-   DB_USER=$(echo "$CONFIG_JSON" | jq -r '.DB_USER')
-   DB_PASS=$(echo "$CONFIG_JSON" | jq -r '.DB_PASS')
-   DB_NAME=$(echo "$CONFIG_JSON" | jq -r '.DB_NAME')
-   JWT_SECRET=$(echo "$CONFIG_JSON" | jq -r '.JWT_SECRET')
+# ---------- System packages + Node.js ----------
+if [ "$OS" = "al2023" ]; then
+  dnf -y update
+  dnf install -y git nginx mariadb105 python3 tar
+  if [ "$(node_major)" -lt "$NODE_MAJOR" ]; then
+    curl -fsSL "https://rpm.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
+    dnf install -y nodejs
+  fi
+else
+  # Amazon Linux 2: glibc 2.26 is too old for official Node 18+ builds,
+  # so use the Node.js project's "unofficial-builds" glibc-217 binaries.
+  yum -y update
+  yum install -y git python3 tar xz
+  amazon-linux-extras install -y nginx1 mariadb10.5
+  if [ "$(node_major)" -lt "$NODE_MAJOR" ]; then
+    NODE_VER=$(curl -fsSL https://unofficial-builds.nodejs.org/download/release/index.json | python3 -c '
+import json, sys
+major = sys.argv[1]
+for r in json.load(sys.stdin):
+    if r["version"].startswith("v" + major + ".") and "linux-x64-glibc-217" in r.get("files", []):
+        print(r["version"]); break' "$NODE_MAJOR")
+    if [ -z "$NODE_VER" ]; then
+      echo "ERROR: could not find a Node ${NODE_MAJOR} glibc-217 build for Amazon Linux 2" >&2
+      exit 1
+    fi
+    echo "Installing Node ${NODE_VER} (glibc-217 build)"
+    mkdir -p /usr/local/lib/nodejs
+    curl -fsSL "https://unofficial-builds.nodejs.org/download/release/${NODE_VER}/node-${NODE_VER}-linux-x64-glibc-217.tar.xz" \
+      | tar -xJ -C /usr/local/lib/nodejs
+    ln -sfn "/usr/local/lib/nodejs/node-${NODE_VER}-linux-x64-glibc-217" /usr/local/lib/nodejs/current
+    for b in node npm npx; do ln -sf "/usr/local/lib/nodejs/current/bin/$b" "/usr/bin/$b"; done
+  fi
+fi
+echo "Node $(node -v), npm $(npm -v)"
 
-   # Create .env file with quoted values to handle special characters
-   cat > .env << EOF
-   DB_HOST='$DB_HOST'
-   DB_USER='$DB_USER'
-   DB_PASS='$DB_PASS'
-   DB_NAME='$DB_NAME'
-   JWT_SECRET='$JWT_SECRET'
-   PORT=3000
-   EOF
+# ---------- Swap (frontend build needs memory on small instances) ----------
+MEM_MB=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+if [ "$MEM_MB" -lt 2000 ] && [ -z "$(swapon --show 2>/dev/null)" ]; then
+  echo "Low memory (${MEM_MB} MB): creating 2 GB swap"
+  [ -f /swapfile ] || dd if=/dev/zero of=/swapfile bs=1M count=2048 status=none
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
 
-   # Set proper permissions
-   chown -R ec2-user:ec2-user /home/ec2-user/app
-   chmod 600 /home/ec2-user/app/backend/.env
+# ---------- Get code (clone or update) ----------
+git config --global --add safe.directory "$APP_DIR" || true
+if [ -d "$APP_DIR/.git" ]; then
+  echo "Updating existing repo in $APP_DIR"
+  git -C "$APP_DIR" fetch --depth 1 origin "$REPO_BRANCH"
+  git -C "$APP_DIR" reset --hard FETCH_HEAD
+else
+  rm -rf "$APP_DIR"
+  git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$APP_DIR"
+fi
 
-   # Initialize database tables (run only once, idempotent)
-   dnf install -y mariadb105
-   
-   # Wait for RDS to be ready
-   until mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" -e "SELECT 1" &>/dev/null; do
-     echo "Waiting for RDS to be ready..."
-     sleep 5
-   done
+# ---------- Read all config from ONE SSM parameter ----------
+CONFIG_JSON=$(aws ssm get-parameter --name "$SSM_PARAM" --with-decryption \
+  --query "Parameter.Value" --output text)
 
-   # Create tables if they don't exist
-   mysql -h "$DB_HOST" -u "$DB_USER" -p"$DB_PASS" "$DB_NAME" << 'SQLEOF'
-   CREATE TABLE IF NOT EXISTS users (
-     id INT AUTO_INCREMENT PRIMARY KEY,
-     username VARCHAR(50) UNIQUE,
-     password VARCHAR(255),
-     role ENUM('EMPLOYEE','ADMIN') DEFAULT 'EMPLOYEE'
-   );
+# Parse with python3. Accepts strict JSON and tolerates common copy/paste problems:
+#   - KEY=VALUE lines (.env style)
+#   - JSON whose quotes were stripped by PowerShell: {DB_HOST:xxx,DB_USER:admin,...}
+#   - smart quotes / trailing commas
+PARSED_CFG=$(printf '%s' "$CONFIG_JSON" | python3 -c '
+import json, re, shlex, sys
+KEYS = ["DB_HOST", "DB_USER", "DB_PASS", "DB_NAME", "JWT_SECRET", "API_URL"]
+raw = sys.stdin.read().strip()
+cfg, mode = None, "json"
+try:
+    cfg = json.loads(raw)
+except Exception:
+    mode = "fallback"
+    txt = raw.translate({0x201c: 34, 0x201d: 34, 0x2018: 39, 0x2019: 39})
+    try:
+        cfg = json.loads(re.sub(r",\s*}", "}", txt))
+    except Exception:
+        pat = r"[\"\x27]?\b(" + "|".join(KEYS) + r")\b[\"\x27]?\s*[:=]\s*"
+        parts = re.split(pat, txt.strip().strip("{}"))
+        cfg = {}
+        for i in range(1, len(parts) - 1, 2):
+            v = parts[i + 1].strip().rstrip(",").strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"\x27":
+                v = v[1:-1]
+            cfg[parts[i]] = v
+if not isinstance(cfg, dict) or not cfg:
+    masked = re.sub(r"[A-Za-z0-9]", "x", raw[:60])
+    sys.stderr.write("ERROR: cannot parse SSM config (length %d). Shape (letters/digits masked): %s\n" % (len(raw), masked))
+    sys.exit(1)
+if mode != "json":
+    sys.stderr.write("WARNING: config is not strict JSON; parsed with fallback. Keys found: %s\n" % ", ".join(k for k in KEYS if k in cfg))
+for k in KEYS:
+    v = cfg.get(k)
+    print("%s=%s" % (k, shlex.quote("" if v is None else str(v))))
+') || exit 1
+eval "$PARSED_CFG"
 
-   CREATE TABLE IF NOT EXISTS leave_requests (
-     id INT AUTO_INCREMENT PRIMARY KEY,
-     user_id INT,
-     start_date DATE,
-     end_date DATE,
-     reason VARCHAR(255),
-     status ENUM('PENDING','APPROVED','REJECTED') DEFAULT 'PENDING',
-     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-   );
-   SQLEOF
+API_URL="${API_URL:-/api}"
+API_URL="${API_URL%/}"   # strip trailing slash
+case "$API_URL" in
+  /*) ;;
+  *) echo "ERROR: API_URL must be a relative path like /api (got: $API_URL)" >&2; exit 1 ;;
+esac
 
-   echo "Database tables initialized successfully"
+for v in DB_HOST DB_USER DB_PASS DB_NAME JWT_SECRET; do
+  if [ -z "${!v}" ]; then
+    echo "ERROR: $v missing from $SSM_PARAM" >&2
+    exit 1
+  fi
+  case "${!v}" in
+    *\'*) echo "ERROR: $v must not contain a single quote (')" >&2; exit 1 ;;
+  esac
+done
+echo "Config loaded from $SSM_PARAM (DB_HOST=$DB_HOST, DB_NAME=$DB_NAME, API_URL=$API_URL)"
 
-   # Install PM2 globally
-   npm install -g pm2
+# ---------- Database init (idempotent) ----------
+export MYSQL_PWD="$DB_PASS"   # keeps the password off the command line
+echo "Waiting for database $DB_HOST:3306 ..."
+for i in $(seq 1 60); do
+  if mysql -h "$DB_HOST" -u "$DB_USER" -e "SELECT 1" >/dev/null 2>&1; then
+    echo "Database reachable"; break
+  fi
+  if [ "$i" -eq 60 ]; then
+    echo "ERROR: cannot connect to MySQL at $DB_HOST:3306 after 5 minutes." >&2
+    echo "       Check the RDS security group allows 3306 from this instance, and DB_USER/DB_PASS." >&2
+    mysql -h "$DB_HOST" -u "$DB_USER" -e "SELECT 1" || true
+    exit 1
+  fi
+  sleep 5
+done
 
-   # Start application with PM2 as ec2-user
-   sudo -u ec2-user bash << 'USEREOF'
-   cd /home/ec2-user/app/backend
-   pm2 start app.js --name "backend"
-   pm2 save
-   USEREOF
+mysql -h "$DB_HOST" -u "$DB_USER" -e "CREATE DATABASE IF NOT EXISTS \`$DB_NAME\`"
+mysql -h "$DB_HOST" -u "$DB_USER" "$DB_NAME" << 'SQLEOF'
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  username VARCHAR(50) UNIQUE,
+  password VARCHAR(255),
+  role ENUM('EMPLOYEE','ADMIN') DEFAULT 'EMPLOYEE'
+);
 
-   # Configure PM2 to start on boot
-   env PATH=$PATH:/usr/bin pm2 startup systemd -u ec2-user --hp /home/ec2-user
-   systemctl enable pm2-ec2-user
-   ```
+CREATE TABLE IF NOT EXISTS leave_requests (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT,
+  start_date DATE,
+  end_date DATE,
+  reason VARCHAR(255),
+  status ENUM('PENDING','APPROVED','REJECTED') DEFAULT 'PENDING',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+SQLEOF
+unset MYSQL_PWD
+echo "Database tables ready"
+
+# ---------- Backend ----------
+cd "$APP_DIR/backend"
+npm ci --omit=dev || npm install --omit=dev
+
+cat > .env << EOF
+DB_HOST='$DB_HOST'
+DB_USER='$DB_USER'
+DB_PASS='$DB_PASS'
+DB_NAME='$DB_NAME'
+JWT_SECRET='$JWT_SECRET'
+PORT=3000
+EOF
+chmod 600 .env
+
+# ---------- Frontend build ----------
+cd "$APP_DIR/frontend"
+npm ci || npm install
+VITE_API_URL="$API_URL" npm run build
+
+mkdir -p /usr/share/nginx/html
+rm -rf /usr/share/nginx/html/*
+cp -r dist/* /usr/share/nginx/html/
+
+# ---------- Nginx ----------
+# Write a clean main config instead of patching the distro one, so it is the same on AL2 and AL2023.
+[ -f /etc/nginx/nginx.conf.orig ] || cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.orig
+cat > /etc/nginx/nginx.conf << 'EOF'
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log notice;
+pid /run/nginx.pid;
+
+include /usr/share/nginx/modules/*.conf;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                    '$status $body_bytes_sent "$http_referer" '
+                    '"$http_user_agent" "$http_x_forwarded_for"';
+    access_log /var/log/nginx/access.log main;
+
+    sendfile            on;
+    tcp_nopush          on;
+    keepalive_timeout   65;
+    types_hash_max_size 4096;
+    server_tokens       off;
+
+    include      /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    include /etc/nginx/conf.d/*.conf;
+}
+EOF
+
+# Disable any other site configs (e.g. default.conf from the old frontend script)
+for f in /etc/nginx/conf.d/*.conf; do
+  [ -e "$f" ] || continue
+  [ "$(basename "$f")" = "leave-app.conf" ] && continue
+  mv -f "$f" "$f.disabled"
+done
+
+cat > /etc/nginx/conf.d/leave-app.conf << 'EOF'
+upstream backend {
+    server 127.0.0.1:3000;
+    keepalive 16;
+}
+
+server {
+    listen 80 default_server;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+    # API -> Node backend. Public route comes from SSM API_URL; backend router is mounted at /api.
+    location ^~ __API_URL__/ {
+        proxy_pass http://backend/api/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60s;
+    }
+
+    # ALB target group health check: 200 only if Nginx AND the Node backend are up (502 if backend is down)
+    location = /health {
+        proxy_pass http://backend/health;
+        access_log off;
+    }
+
+    # Cache static assets
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        try_files $uri =404;
+    }
+
+    # SPA routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+EOF
+sed -i "s#__API_URL__#${API_URL}#g" /etc/nginx/conf.d/leave-app.conf
+
+# Allow Nginx to proxy to the local backend if SELinux is enforcing
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce)" = "Enforcing" ]; then
+  setsebool -P httpd_can_network_connect 1 || true
+fi
+
+nginx -t
+systemctl enable nginx
+systemctl restart nginx
+
+# ---------- Permissions ----------
+chown -R "$APP_USER:$APP_USER" "$APP_DIR"
+
+# ---------- PM2 ----------
+npm install -g pm2
+if [ ! -x /usr/bin/pm2 ] && [ -x /usr/local/lib/nodejs/current/bin/pm2 ]; then
+  ln -sf /usr/local/lib/nodejs/current/bin/pm2 /usr/bin/pm2
+fi
+PM2_BIN=$(command -v pm2)
+NODE_BIN_DIR=$(dirname "$(readlink -f "$(command -v node)")")
+
+sudo -u "$APP_USER" -H env PATH="$NODE_BIN_DIR:/usr/bin:/bin" bash -c "
+  set -e
+  cd '$APP_DIR/backend'
+  '$PM2_BIN' delete backend >/dev/null 2>&1 || true
+  '$PM2_BIN' start app.js --name backend
+  '$PM2_BIN' save
+"
+
+env PATH="$NODE_BIN_DIR:$PATH" "$PM2_BIN" startup systemd -u "$APP_USER" --hp "/home/$APP_USER"
+systemctl enable "pm2-$APP_USER"
+
+# ---------- Verify ----------
+echo "Checking http://127.0.0.1/health ..."
+for i in $(seq 1 15); do
+  if curl -fsS http://127.0.0.1/health >/dev/null 2>&1; then
+    echo "Health check OK"
+    echo "===== $(date -u) : deploy complete: frontend on :80, API ${API_URL} -> :3000/api ====="
+    exit 0
+  fi
+  sleep 2
+done
+echo "ERROR: health check failed. Debug with:" >&2
+echo "  sudo -u $APP_USER pm2 logs backend --lines 50" >&2
+echo "  sudo tail -n 50 /var/log/nginx/error.log" >&2
+exit 1
+```
 
 8. **Create Launch Template**
 
 ### 9.2 Database Tables Initialization
 
-**Important:** The user data script above automatically creates the database tables (`users` and `leave_requests`) when the first backend instance launches. The script uses `CREATE TABLE IF NOT EXISTS`, so it's safe to run multiple times and won't cause errors if tables already exist.
+**Important:** The user data script automatically creates the database tables (`users` and `leave_requests`) when an instance launches. It uses `CREATE TABLE IF NOT EXISTS`, so it's safe to run on every instance and won't cause errors if the tables already exist.
 
 **What happens:**
-1. The script installs MySQL client
-2. Waits for RDS to be ready
+1. The script installs the MySQL client
+2. Waits for RDS to be reachable
 3. Creates the `users` and `leave_requests` tables if they don't exist
-4. This runs on every backend instance launch, but only creates tables once
 
 **Manual Setup (Optional):**
 If you prefer to create tables manually before launching instances:
@@ -831,243 +1070,174 @@ USE leave_db;
 -- Then run the CREATE TABLE statements from db.sql
 ```
 
----
+### 9.3 Provisioning Time
 
-## 10. Frontend Tier Deployment
+First boot takes about **5–10 minutes** (system update, Node.js install, `npm install`, frontend build). The ASG health check grace period in [10.1](#101-create-auto-scaling-group-attach-existing-alb-target-group) is set to cover this.
 
-### 10.1 Create Frontend Launch Template
+### 9.4 Run or Re-run the Script Directly
 
-1. **Navigate to EC2 → Launch Templates → Create launch template**
+The script is idempotent, so you can run it by hand on an instance (for example, to fix a failed first boot or to deploy new code):
 
-2. **Launch Template Name and Description**
-   ```
-   Launch template name: LeaveApp-Frontend-LT
-   Template version description: Frontend React application v1
-   ```
+```bash
+curl -fsSL -o userdata-single-ec2.sh \
+  https://raw.githubusercontent.com/hlaingminpaing/3-tier-leave-management-system/main/userdata-single-ec2.sh
+sudo bash userdata-single-ec2.sh
 
-3. **Application and OS Images (AMI)**
-   ```
-   Quick Start: Amazon Linux
-   Amazon Machine Image: Amazon Linux 2023 AMI (latest)
-   Architecture: 64-bit (x86)
-   ```
+# Optional overrides
+sudo AWS_REGION=ap-southeast-1 SSM_PARAM=/leave-app/production/config REPO_BRANCH=main \
+  bash userdata-single-ec2.sh
+```
 
-4. **Instance Type**
-   ```
-   Instance type: t3.small (needs more RAM for npm build)
-   ```
+On re-run it pulls the latest code, rewrites `.env` and the Nginx config, rebuilds the frontend and restarts the backend with PM2. It ends with a local `/health` check and exits non-zero if that fails. Output is appended to `/var/log/user-data.log`.
 
-5. **Key Pair**
-   ```
-   Key pair name: Select your existing key pair
-   ```
+**OS differences handled by the script**
 
-6. **Network Settings**
-   ```
-   Subnet: Don't include in launch template
-   Firewall (security groups): Select existing security group
-     - leave-system-frontend-sg
-   ```
+| | Amazon Linux 2023 | Amazon Linux 2 |
+|---|---|---|
+| Packages | `dnf` | `yum` + `amazon-linux-extras` (`nginx1`, `mariadb10.5`) |
+| Node.js 22 | NodeSource RPM | Node.js glibc-217 build from unofficial-builds.nodejs.org (official builds need a newer glibc than AL2 has) |
+| Nginx config | Script writes a clean `/etc/nginx/nginx.conf` (original saved as `nginx.conf.orig`) | Same |
 
-7. **Advanced Details**
-   
-   **IAM Instance Profile:**
-   ```
-   IAM instance profile: LeaveApp-EC2-Role
-   ```
-
-   **User Data:**
-   
-   Replace `YOUR_GITHUB_USER` and `YOUR_REPO_NAME`:
-
-   ```bash
-   #!/bin/bash
-   set -e
-
-   # Update system
-   dnf update -y
-
-   # Install Node.js 22 (Vite requires Node 20+)
-   curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-   dnf install -y nodejs git nginx jq
-
-   # Create application directory
-   cd /home/ec2-user
-
-   # Clone repository and checkout deploy/aws branch
-   git clone https://github.com/hlaingminpaing/3-tier-leave-management-system.git app
-   cd app/frontend
-
-   # Install dependencies
-   npm install
-
-   # Read API route from the shared SSM config parameter (fallback: /api)
-   export AWS_DEFAULT_REGION=ap-southeast-7
-   CONFIG_JSON=$(aws ssm get-parameter --name "/leave-app/production/config" --with-decryption --query "Parameter.Value" --output text)
-   export VITE_API_URL=$(echo "$CONFIG_JSON" | jq -r '.API_URL // "/api"')
-
-   # Build production bundle
-   npm run build
-
-   # Deploy to Nginx
-   rm -rf /usr/share/nginx/html/*
-   cp -r dist/* /usr/share/nginx/html/
-
-   # Configure Nginx for React SPA
-   cat > /etc/nginx/conf.d/default.conf << 'EOF'
-   server {
-       listen 80;
-       server_name _;
-       root /usr/share/nginx/html;
-       index index.html;
-
-       # Enable gzip compression
-       gzip on;
-       gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-
-       # SPA routing - serve index.html for all routes
-       location / {
-           try_files $uri $uri/ /index.html;
-       }
-
-       # Cache static assets
-       location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-           expires 1y;
-           add_header Cache-Control "public, immutable";
-       }
-   }
-   EOF
-
-   # Start and enable Nginx
-   systemctl enable nginx
-   systemctl start nginx
-   ```
-
-8. **Create Launch Template**
+> Instances with less than 2 GB RAM get a 2 GB swap file automatically so the frontend build doesn't run out of memory.
 
 ---
 
-## 11. Auto Scaling Configuration
+## 10. Auto Scaling Configuration
 
-### 11.1 Create Backend Auto Scaling Group
+### 10.1 Create Auto Scaling Group (Attach Existing ALB Target Group)
+
+Before you start, make sure these already exist:
+- Launch template `LeaveApp-App-LT` ([9.1](#91-create-launch-template))
+- ALB `leave-system-alb` with target group `leave-system-app-tg` ([section 8](#8-application-load-balancer-setup))
 
 1. **Navigate to EC2 → Auto Scaling Groups → Create Auto Scaling group**
 
-2. **Step 1: Choose Launch Template**
+2. **Step 1: Choose launch template**
    ```
-   Auto Scaling group name: leave-system-backend-asg
-   Launch template: LeaveApp-Backend-LT
+   Auto Scaling group name: leave-system-app-asg
+   Launch template: LeaveApp-App-LT
    Version: Latest
    ```
+   Click **Next**.
 
-3. **Step 2: Choose Instance Launch Options**
+3. **Step 2: Choose instance launch options**
    ```
    VPC: leave-system-vpc
    Availability Zones and subnets:
      - leave-system-app-subnet-1a
      - leave-system-app-subnet-1b
+   Availability Zone distribution: Balanced best effort
    ```
+   Click **Next**.
 
-4. **Step 3: Configure Advanced Options**
+4. **Step 3: Integrate with other services — attach the existing ALB**
    ```
-   Load balancing: Attach to an existing load balancer
-   Choose from your load balancer target groups:
-     - leave-system-backend-tg
-   
+   Load balancing:
+     (•) Attach to an existing load balancer
+         ( ) Attach to a new load balancer
+         ( ) No load balancer
+
+   Attach to an existing load balancer:
+     (•) Choose from your load balancer target groups
+         ( ) Choose from Classic Load Balancers
+
+   Existing load balancer target groups:
+     ✅ leave-system-app-tg | HTTP   (Application Load Balancer: leave-system-alb)
+
+   VPC Lattice integration options: No VPC Lattice service
+
    Health checks:
-     ✅ ELB health checks
-     Health check grace period: 300 seconds
+     ✅ Turn on Elastic Load Balancing health checks
+     Health check grace period: 600 seconds
    ```
+   - Selecting the target group is what connects the ASG to the ALB: every instance the ASG launches is registered in `leave-system-app-tg` automatically, and deregistered when it is terminated.
+   - With ELB health checks on, the ASG replaces instances that the target group marks unhealthy.
+   - The 600-second grace period gives first boot time to finish the build before health checks count.
 
-5. **Step 4: Configure Group Size and Scaling**
+   Click **Next**.
+
+5. **Step 4: Configure group size and scaling**
    ```
    Desired capacity: 2
    Minimum capacity: 1
    Maximum capacity: 4
-   
-   Scaling policies: Target tracking scaling policy
+
+   Automatic scaling: Target tracking scaling policy
+     - Scaling policy name: cpu-target-70
      - Metric type: Average CPU utilization
      - Target value: 70
-     - Instance warmup: 300 seconds
+     - Instance warmup: 600 seconds
+
+   Instance maintenance policy: Prioritize availability (launch before terminating)
    ```
+   Click **Next**.
 
-6. **Step 5: Add Notifications** (Optional)
-   - Skip for now
+6. **Step 5: Add notifications** (Optional) — skip for now
 
-7. **Step 6: Add Tags**
+7. **Step 6: Add tags**
    ```
    Key: Name
-   Value: leave-system-backend
+   Value: leave-system-app
+   ✅ Tag new instances
    ```
 
-8. **Create Auto Scaling Group**
+8. **Step 7: Review → Create Auto Scaling group**
 
-### 11.2 Create Frontend Auto Scaling Group
+9. **Confirm the attachment**
+   - EC2 → Auto Scaling Groups → `leave-system-app-asg` → **Integrations** tab → Load balancing shows `leave-system-app-tg`
+   - EC2 → Target Groups → `leave-system-app-tg` → **Targets** tab → instances appear and become `healthy` after provisioning
 
-1. **Create another Auto Scaling group**
+**Attach to an existing ASG instead** (if the ASG was created without a load balancer):
+- EC2 → Auto Scaling Groups → select the ASG → **Integrations** tab → Load balancing → **Edit**
+- ✅ Application, Network or Gateway Load Balancer target groups → select `leave-system-app-tg` → **Update**
+- **Details** tab → Health checks → **Edit** → ✅ Elastic Load Balancing health checks, grace period 600 → **Update**
 
-2. **Step 1: Choose Launch Template**
-   ```
-   Auto Scaling group name: leave-system-frontend-asg
-   Launch template: LeaveApp-Frontend-LT
-   Version: Latest
-   ```
+**AWS CLI alternative:**
+```bash
+export AWS_DEFAULT_REGION=ap-southeast-7
 
-3. **Step 2: Choose Instance Launch Options**
-   ```
-   VPC: leave-system-vpc
-   Availability Zones and subnets:
-     - leave-system-app-subnet-1a
-     - leave-system-app-subnet-1b
-   ```
+TG_ARN=$(aws elbv2 describe-target-groups --names leave-system-app-tg \
+  --query "TargetGroups[0].TargetGroupArn" --output text)
 
-4. **Step 3: Configure Advanced Options**
-   ```
-   Load balancing: Attach to an existing load balancer
-   Choose from your load balancer target groups:
-     - leave-system-frontend-tg
-   
-   Health checks:
-     ✅ ELB health checks
-     Health check grace period: 300 seconds
-   ```
+aws autoscaling create-auto-scaling-group \
+  --auto-scaling-group-name leave-system-app-asg \
+  --launch-template "LaunchTemplateName=LeaveApp-App-LT,Version=\$Latest" \
+  --vpc-zone-identifier "subnet-APP-1A,subnet-APP-1B" \
+  --target-group-arns "$TG_ARN" \
+  --health-check-type ELB \
+  --health-check-grace-period 600 \
+  --min-size 1 --max-size 4 --desired-capacity 2 \
+  --tags "Key=Name,Value=leave-system-app,PropagateAtLaunch=true"
 
-5. **Step 4: Configure Group Size and Scaling**
-   ```
-   Desired capacity: 2
-   Minimum capacity: 1
-   Maximum capacity: 4
-   
-   Scaling policies: Target tracking scaling policy
-     - Metric type: Average CPU utilization
-     - Target value: 70
-     - Instance warmup: 300 seconds
-   ```
+aws autoscaling put-scaling-policy \
+  --auto-scaling-group-name leave-system-app-asg \
+  --policy-name cpu-target-70 \
+  --policy-type TargetTrackingScaling \
+  --target-tracking-configuration '{"PredefinedMetricSpecification":{"PredefinedMetricType":"ASGAverageCPUUtilization"},"TargetValue":70.0}'
 
-6. **Step 5: Add Tags**
-   ```
-   Key: Name
-   Value: leave-system-frontend
-   ```
-
-7. **Create Auto Scaling Group**
+# Attach the target group to an existing ASG
+aws autoscaling attach-load-balancer-target-groups \
+  --auto-scaling-group-name leave-system-app-asg \
+  --target-group-arns "$TG_ARN"
+```
+Replace `subnet-APP-1A,subnet-APP-1B` with the IDs of your private app subnets.
 
 ---
 
-## 12. Testing and Validation
+## 11. Testing and Validation
 
-### 12.1 Wait for Instances to Launch
+### 11.1 Wait for Instances to Launch
 
 1. **Check Auto Scaling Groups**
    - EC2 → Auto Scaling Groups
-   - Verify both ASGs show "Desired: 2, Current: 2"
+   - Verify `leave-system-app-asg` shows "Desired: 2, Current: 2"
 
 2. **Check Target Group Health**
    - EC2 → Target Groups
-   - Select each target group
+   - Select `leave-system-app-tg`
    - Targets tab → Wait for status "healthy" (~5-10 minutes)
 
-### 12.2 Test the Application
+### 11.2 Test the Application
 
 1. **Get ALB DNS Name**
    - EC2 → Load Balancers
@@ -1092,13 +1262,13 @@ USE leave_db;
    - Login as admin
    - Approve/reject leave request
 
-### 12.3 Troubleshooting
+### 11.3 Troubleshooting
 
 If targets are unhealthy:
 
 1. **Check Security Groups**
-   - Verify ALB can reach instances on correct ports
-   - Verify backend can reach RDS on port 3306
+   - Verify `leave-system-alb-sg` can reach `leave-system-app-sg` on port 80
+   - Verify `leave-system-app-sg` can reach RDS on port 3306
 
 2. **Check Instance Logs via Session Manager**
    ```
@@ -1110,20 +1280,29 @@ If targets are unhealthy:
 
 3. **Check User Data Execution**
    ```
+   sudo tail -n 100 /var/log/user-data.log
    sudo cat /var/log/cloud-init-output.log
    ```
 
-4. **Verify SSM Parameters**
+4. **Check Nginx and the Local Backend on the Instance**
+   ```
+   sudo -u ec2-user pm2 status
+   sudo nginx -t && systemctl status nginx
+   curl -s http://127.0.0.1/health          # via Nginx → backend
+   curl -s http://127.0.0.1:3000/api/health # backend directly
+   ```
+
+5. **Verify SSM Parameter**
    ```
    aws ssm get-parameter --name "/leave-app/production/config" --with-decryption \
-     --query "Parameter.Value" --output text | jq .
+     --query "Parameter.Value" --output text | python3 -m json.tool
    ```
 
 ---
 
-## 13. Monitoring and Maintenance
+## 12. Monitoring and Maintenance
 
-### 13.1 CloudWatch Monitoring
+### 12.1 CloudWatch Monitoring
 
 1. **Navigate to CloudWatch → Dashboards**
 
@@ -1136,7 +1315,7 @@ If targets are unhealthy:
    - RDS CPU Utilization
    - RDS Database Connections
 
-### 13.2 Set Up Alarms
+### 12.2 Set Up Alarms
 
 **High CPU Alarm:**
 ```
@@ -1152,7 +1331,7 @@ Threshold: >= 1 for 2 consecutive periods
 Action: Send SNS notification
 ```
 
-### 13.3 Backup Strategy
+### 12.3 Backup Strategy
 
 **RDS Automated Backups:**
 - Already configured (7-day retention)
@@ -1162,7 +1341,7 @@ Action: Send SNS notification
 - Version controlled in GitHub
 - Tag releases for rollback capability
 
-### 13.4 Update Strategy
+### 12.4 Update Strategy
 
 **To Deploy New Code:**
 
@@ -1176,7 +1355,7 @@ Action: Send SNS notification
 
 **Alternative: Blue/Green Deployment**
 - Create new ASG with new launch template
-- Attach to same target groups
+- Attach to the same target group (`leave-system-app-tg`)
 - Gradually shift traffic
 - Terminate old ASG
 
@@ -1186,7 +1365,7 @@ Action: Send SNS notification
 
 | Resource | Configuration | Estimated Cost |
 |----------|--------------|----------------|
-| EC2 Instances | 4x t3.micro (2 frontend, 2 backend) | ~$30 |
+| EC2 Instances | 2x t3.small (frontend + backend on each) | ~$30 |
 | NAT Gateways | 2x NAT Gateway | ~$65 |
 | Application Load Balancer | 1x ALB | ~$20 |
 | RDS MySQL | 1x db.t3.micro | ~$15 |
