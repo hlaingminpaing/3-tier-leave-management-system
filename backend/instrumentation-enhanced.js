@@ -178,17 +178,14 @@ activeUsersGauge.addCallback((result) => {
 
 // Track leave requests by status
 leaveRequestsByStatusGauge.addCallback((result) => {
-    // Called from database queries in app
-    if (globalThis.leaveRequestsByStatus) {
-        Object.entries(globalThis.leaveRequestsByStatus).forEach(([status, count]) => {
-            result.observe(count, { status });
-        });
-    }
+    const statusCounts = globalThis.leaveRequestsByStatus || { PENDING: 0, APPROVED: 0, REJECTED: 0 };
+    Object.entries(statusCounts).forEach(([status, count]) => {
+        result.observe(Number(count) || 0, { status });
+    });
 });
 
 // Track DB connection pool
 dbConnectionPoolGauge.addCallback((result) => {
-    // Will be updated when pool info is available
     if (globalThis.dbPoolInfo) {
         result.observe(globalThis.dbPoolInfo.current || 0, { pool_type: 'current' });
         result.observe(globalThis.dbPoolInfo.max || 0, { pool_type: 'max' });
@@ -197,11 +194,10 @@ dbConnectionPoolGauge.addCallback((result) => {
 
 // Track leave approval rate
 leaveApprovalRateGauge.addCallback((result) => {
-    if (globalThis.leaveApprovalStats) {
-        const total = globalThis.leaveApprovalStats.approved + globalThis.leaveApprovalStats.rejected;
-        const approvalRate = total > 0 ? (globalThis.leaveApprovalStats.approved / total) * 100 : 0;
-        result.observe(approvalRate, {});
-    }
+    const stats = globalThis.leaveApprovalStats || { approved: 0, rejected: 0 };
+    const total = (Number(stats.approved) || 0) + (Number(stats.rejected) || 0);
+    const approvalRate = total > 0 ? ((Number(stats.approved) || 0) / total) * 100 : 0;
+    result.observe(approvalRate, {});
 });
 
 // ============================================================

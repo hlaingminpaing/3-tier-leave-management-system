@@ -33,8 +33,35 @@ backend:
       cpu: "1000m"
       memory: "1Gi"
   secrets:
-    externalSecrets: true
-    externalSecretsName: leave-secrets-production
+    # ── Mode C: Helm-managed SealedSecret (GitOps flow) ──
+    # Flow:
+    #   1. kubeseal encrypts plain-secret.yaml  →  encrypted values
+    #   2. Paste encrypted values into sealedSecretsData below
+    #   3. git push  →  ArgoCD syncs  →  Helm renders SealedSecret resource
+    #   4. sealed-secrets-controller (kube-system) decrypts  →  creates plain Secret
+    #   5. Backend pod reads DB credentials from Secret via secretKeyRef  ✅
+    #
+    # Prerequisite: sealed-secrets controller must be installed in kube-system:
+    #   helm install sealed-secrets sealed-secrets/sealed-secrets -n kube-system
+    #
+    # To encrypt your secrets (run once locally):
+    #   kubeseal --controller-namespace kube-system --format yaml \
+    #     < plain-secret.yaml > /dev/null
+    #   (copy the encryptedData values from the output into sealedSecretsData below)
+    #
+    # See helm-chart/SEALED_SECRETS_SETUP.md for the full guide.
+    existingSecret: ""
+    externalSecrets: false
+    sealedSecrets: true
+    sealedSecretsData:
+      # Replace each value with your kubeseal-encrypted output
+      # Run: kubeseal --controller-namespace kube-system --format yaml < plain-secret.yaml
+      db-user: "REPLACE_WITH_KUBESEAL_ENCRYPTED_VALUE"
+      db-password: "REPLACE_WITH_KUBESEAL_ENCRYPTED_VALUE"
+      jwt-secret: "REPLACE_WITH_KUBESEAL_ENCRYPTED_VALUE"
+      root-password: "REPLACE_WITH_KUBESEAL_ENCRYPTED_VALUE"
+      db-host: "REPLACE_WITH_KUBESEAL_ENCRYPTED_VALUE"
+      db-name: "REPLACE_WITH_KUBESEAL_ENCRYPTED_VALUE"
   autoscaling:
     enabled: true
     minReplicas: 3

@@ -1,20 +1,41 @@
-image: node:22-alpine
+image: node:24-alpine
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Pipeline trigger rules:
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#   → Full pipeline: test → security → build → update-manifests
+#   → Docker images tagged with v1.0.0
+#   → k8s/frontend.yaml and k8s/backend.yaml updated to tag: v1.0.0
+#   → helm-chart/values.yaml updated to tag: v1.0.0
+#   → ArgoCD detects change → deploys new version
+#
+#   git push origin main  (or any branch / MR)
+#   → Tests + security only (no build, no deploy)
+#   → Fast feedback, no image waste
+# ══════════════════════════════════════════════════════════════════════════════
 
 workflow:
   rules:
+    # Run pipeline ONLY when a tag is created (e.g. v1.0.0, v1.2.3)
     - if: $CI_COMMIT_TAG
+    # Also run tests on merge requests for fast developer feedback
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    # Also run tests on pushes to the default branch (main)
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
 
 stages:
   - test
   - security
   - build
-  - deploy
+  - update-manifests
 
 variables:
   DOCKER_TLS_CERTDIR: ""
   REGISTRY: $CI_REGISTRY
   IMAGE_PREFIX: $CI_REGISTRY_IMAGE
+  # VERSION_TAG is always the git tag (e.g. v1.0.0) when triggered by a tag.
+  # Falls back to short SHA for non-tag pipelines (test-only runs).
   VERSION_TAG: ${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
 
 include:
@@ -22,6 +43,10 @@ include:
   - template: Security/Secret-Detection.gitlab-ci.yml
   - template: Security/Dependency-Scanning.gitlab-ci.yml
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage: test
+# Runs on: tag, MR, main branch push
+# ─────────────────────────────────────────────────────────────────────────────
 test_backend:
   stage: test
   script:
@@ -42,6 +67,10 @@ test_frontend:
     paths:
       - frontend/coverage/
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage: security
+# Runs on: tag, MR, main branch push
+# ─────────────────────────────────────────────────────────────────────────────
 sast:
   stage: security
 secret_detection:
@@ -49,6 +78,12 @@ secret_detection:
 dependency_scanning:
   stage: security
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage: build
+# Runs on: TAG ONLY
+# Builds Docker images tagged with the git tag (e.g. v1.0.0)
+# Also pushes :latest tag
+# ─────────────────────────────────────────────────────────────────────────────
 build_and_push:
   stage: build
   image: docker:latest
@@ -56,154 +91,73 @@ build_and_push:
     - docker:dind
   needs: ["test_backend", "test_frontend"]
   before_script:
-    - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
-    - echo "Using version tag $VERSION_TAG"
+    - echo "Building images for tag $CI_COMMIT_TAG"
     - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
   script:
-    # Backend Build
-    - echo "Building Backend version $VERSION_TAG..."
-    - docker build -t $IMAGE_PREFIX/backend:$VERSION_TAG -t $IMAGE_PREFIX/backend:latest ./backend
-    - docker push $IMAGE_PREFIX/backend:$VERSION_TAG
+    # Backend
+    - echo "==> Building backend:$CI_COMMIT_TAG"
+    - docker build -t $IMAGE_PREFIX/backend:$CI_COMMIT_TAG -t $IMAGE_PREFIX/backend:latest ./backend
+    - docker push $IMAGE_PREFIX/backend:$CI_COMMIT_TAG
     - docker push $IMAGE_PREFIX/backend:latest
 
-    # Frontend Build
-    - echo "Building Frontend version $VERSION_TAG..."
-    - docker build -t $IMAGE_PREFIX/frontend:$VERSION_TAG -t $IMAGE_PREFIX/frontend:latest ./frontend
-    - docker push $IMAGE_PREFIX/frontend:$VERSION_TAG
+    # Frontend
+    - echo "==> Building frontend:$CI_COMMIT_TAG"
+    - docker build -t $IMAGE_PREFIX/frontend:$CI_COMMIT_TAG -t $IMAGE_PREFIX/frontend:latest ./frontend
+    - docker push $IMAGE_PREFIX/frontend:$CI_COMMIT_TAG
     - docker push $IMAGE_PREFIX/frontend:latest
+  rules:
+    # Only build+push when a tag is created
+    - if: $CI_COMMIT_TAG
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Stage: update-manifests
+# Runs on: TAG ONLY (after build_and_push)
+# Updates image tags to $CI_COMMIT_TAG in:
+#   - k8s/frontend.yaml
+#   - k8s/backend.yaml
+#   - helm-chart/values.yaml
+# Commits back to the default branch with [skip ci] so it doesn't loop.
+# ArgoCD watches the repo → detects the tag change → deploys new version.
+# ─────────────────────────────────────────────────────────────────────────────
 update_manifests:
-  stage: deploy
+  stage: update-manifests
   image: bitnami/git:latest
   needs: ["build_and_push"]
-  script:
-    - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
-    
-    - git remote set-url origin "https://${CI_DEPLOY_USER}:${GIT_DEPLOY_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
-
+  before_script:
+    - echo "==> Updating image tags to $CI_COMMIT_TAG across k8s manifests and helm-chart"
+    # Authenticate with deploy token or project access token (set GIT_DEPLOY_TOKEN in CI/CD variables)
+    - git remote set-url origin "https://${CI_DEPLOY_USER:-oauth2}:${GIT_DEPLOY_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
     - git config --global user.email "ci-bot@gitlab.com"
     - git config --global user.name "CI Bot"
-    
     - git fetch origin $CI_DEFAULT_BRANCH
     - git checkout $CI_DEFAULT_BRANCH
-
-    - "sed -i \"s|image: $IMAGE_PREFIX/backend:.*|image: $IMAGE_PREFIX/backend:$VERSION_TAG|g\" k8s/backend.yaml"
-    - "sed -i \"s|image: $IMAGE_PREFIX/frontend:.*|image: $IMAGE_PREFIX/frontend:$VERSION_TAG|g\" k8s/frontend.yaml"
-
+  script:
     - |
+      echo "==> Updating image tags to ${CI_COMMIT_TAG} in k8s manifests and helm-chart"
+
+      # 1. Update k8s manifests (k8s/frontend.yaml and k8s/backend.yaml)
+      echo "==> Updating k8s/frontend.yaml and k8s/backend.yaml"
+      sed -i -E "s|(image: .*frontend:).*|\1${CI_COMMIT_TAG}|" k8s/frontend.yaml
+      sed -i -E "s|(image: .*backend:).*|\1${CI_COMMIT_TAG}|" k8s/backend.yaml
+
+      # 2. Update helm-chart/values.yaml
+      echo "==> Updating helm-chart/values.yaml"
+      sed -i -E "/repository: .*\/backend/!b;n;s/tag:.*/tag: ${CI_COMMIT_TAG}/" helm-chart/values.yaml
+      sed -i -E "/repository: .*\/frontend/!b;n;s/tag:.*/tag: ${CI_COMMIT_TAG}/" helm-chart/values.yaml
+
+      echo "==> Verification of updated files:"
+      grep -n "image:" k8s/frontend.yaml k8s/backend.yaml || true
+      grep -n -B1 -A1 "tag: ${CI_COMMIT_TAG}" helm-chart/values.yaml || true
+
       if git diff --quiet; then
-        echo "No changes in manifests. Skipping push."
+        echo "No changes detected in k8s manifests or helm-chart/values.yaml. Skipping commit."
       else
-        git add k8s/*.yaml
-        git commit -m "chore: update images to $VERSION_TAG [skip ci]"
+        echo "==> Committing updated image tags"
+        git add k8s/frontend.yaml k8s/backend.yaml helm-chart/values.yaml
+        git commit -m "chore: update image tags to ${CI_COMMIT_TAG} [skip ci]"
         git push origin $CI_DEFAULT_BRANCH
+        echo "==> Done. Updated k8s manifests and helm-chart to ${CI_COMMIT_TAG} and pushed to $CI_DEFAULT_BRANCH"
       fi
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-
-##################################################
-# image: node:22-alpine
-
-# workflow:
-#   rules:
-#     - if: $CI_COMMIT_TAG
-#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-
-# stages:
-#   - test
-#   - security
-#   - build
-#   - deploy
-
-# variables:
-#   DOCKER_TLS_CERTDIR: ""
-#   REGISTRY: $CI_REGISTRY
-#   IMAGE_PREFIX: $CI_REGISTRY_IMAGE
-#   VERSION_TAG: ${CI_COMMIT_TAG:-$CI_COMMIT_SHORT_SHA}
-
-# include:
-#   - template: Security/SAST.gitlab-ci.yml
-#   - template: Security/Secret-Detection.gitlab-ci.yml
-#   - template: Security/Dependency-Scanning.gitlab-ci.yml
-
-# test_backend:
-#   stage: test
-#   script:
-#     - cd backend
-#     - npm ci
-#     - npm test -- --coverage
-#   artifacts:
-#     paths:
-#       - backend/coverage/
-
-# test_frontend:
-#   stage: test
-#   script:
-#     - cd frontend
-#     - npm ci
-#     - npm test -- --coverage
-#   artifacts:
-#     paths:
-#       - frontend/coverage/
-
-# sast:
-#   stage: security
-# secret_detection:
-#   stage: security
-# dependency_scanning:
-#   stage: security
-
-# build_and_push:
-#   stage: build
-#   image: docker:latest
-#   services:
-#     - docker:dind
-#   needs: ["test_backend", "test_frontend"]
-#   before_script:
-#     - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
-#     - echo "Using version tag $VERSION_TAG"
-#     - echo "$CI_REGISTRY_PASSWORD" | docker login $CI_REGISTRY -u "$CI_REGISTRY_USER" --password-stdin
-#   script:
-#     # Backend Build
-#     - echo "Building Backend version $VERSION_TAG..."
-#     - docker build -t $IMAGE_PREFIX/backend:$VERSION_TAG -t $IMAGE_PREFIX/backend:latest ./backend
-#     - docker push $IMAGE_PREFIX/backend:$VERSION_TAG
-#     - docker push $IMAGE_PREFIX/backend:latest
-
-#     # Frontend Build
-#     - echo "Building Frontend version $VERSION_TAG..."
-#     - docker build -t $IMAGE_PREFIX/frontend:$VERSION_TAG -t $IMAGE_PREFIX/frontend:latest ./frontend
-#     - docker push $IMAGE_PREFIX/frontend:$VERSION_TAG
-#     - docker push $IMAGE_PREFIX/frontend:latest
-
-# update_manifests:
-#   stage: deploy
-#   image: bitnami/git:latest
-#   needs: ["build_and_push"]
-#   script:
-#     # Version Tag ကို ရှာဖွေခြင်း
-#     - if [ -n "$CI_COMMIT_TAG" ]; then export VERSION_TAG=$CI_COMMIT_TAG; else export VERSION_TAG=$CI_COMMIT_SHORT_SHA; fi
-    
-#     # Git Authentication (Deploy Token Username ကို အလိုအလျောက် ယူပါလိမ့်မည်)
-#     - git remote set-url origin "https://${CI_DEPLOY_USER}:${GIT_DEPLOY_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
-
-#     - git config --global user.email "ci-bot@gitlab.com"
-#     - git config --global user.name "CI Bot"
-    
-#     - git fetch origin $CI_DEFAULT_BRANCH
-#     - git checkout $CI_DEFAULT_BRANCH
-
-#     # Manifest ဖိုင်များကို update လုပ်ခြင်း
-#     - "sed -i \"s|image: $IMAGE_PREFIX/backend:.*|image: $IMAGE_PREFIX/backend:$VERSION_TAG|g\" k8s/backend.yaml"
-#     - "sed -i \"s|image: $IMAGE_PREFIX/frontend:.*|image: $IMAGE_PREFIX/frontend:$VERSION_TAG|g\" k8s/frontend.yaml"
-
-#     - |
-#       if git diff --quiet; then
-#         echo "No changes in manifests. Skipping push."
-#       else
-#         git add k8s/*.yaml
-#         git commit -m "chore: update images to $VERSION_TAG [skip ci]"
-#         git push origin $CI_DEFAULT_BRANCH
-#       fi
-#   rules:
-#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    # Only update manifests when a tag is created
+    - if: $CI_COMMIT_TAG

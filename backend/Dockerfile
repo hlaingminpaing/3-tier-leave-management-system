@@ -1,5 +1,5 @@
 # Stage 1: Dependencies
-FROM node:22-alpine AS dependencies
+FROM node:24-alpine AS dependencies
 WORKDIR /app
 
 # Copy package files
@@ -18,7 +18,7 @@ RUN npm ci --only=production --omit=dev && \
     find /app/node_modules -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true
 
 # Stage 2: Production
-FROM node:22-alpine AS production
+FROM node:24-alpine AS production
 WORKDIR /app
 
 # Install only essential runtime dependencies
